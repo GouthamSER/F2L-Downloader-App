@@ -143,6 +143,8 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
     if (showAddScreen) {
         AddDownloadScreen(
             initialUrl = prefillUrl,
+            defaultConnections = vm.settings.defaultConnections,
+            defaultFolder = vm.settings.defaultFolderUri?.let { runCatching { Uri.parse(it) }.getOrNull() },
             onBack = { showAddScreen = false },
             onStart = { url, name, folder, connections, autoStart ->
                 vm.add(url, folder, name, connections, autoStart)
@@ -180,7 +182,7 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
                 Tab.HOME -> DownloadListScreen(items, showFilters = true, filterDefault = StatusFilter.ALL, vm = vm)
                 Tab.DOWNLOADS -> DownloadListScreen(items, showFilters = false, filterDefault = StatusFilter.ACTIVE, vm = vm)
                 Tab.FILES -> FilesScreen(items)
-                Tab.SETTINGS -> SettingsScreen()
+                Tab.SETTINGS -> SettingsScreen(vm)
             }
         }
     }
@@ -403,13 +405,15 @@ private fun FilesScreen(items: List<DownloadItem>) {
 @Composable
 private fun AddDownloadScreen(
     initialUrl: String,
+    defaultConnections: Int = 8,
+    defaultFolder: Uri? = null,
     onBack: () -> Unit,
     onStart: (url: String, name: String, folder: Uri, connections: Int, autoStart: Boolean) -> Unit
 ) {
     var url by remember { mutableStateOf(initialUrl) }
     var fileName by remember { mutableStateOf("") }
-    var folder by remember { mutableStateOf<Uri?>(null) }
-    var connections by remember { mutableIntStateOf(8) }
+    var folder by remember { mutableStateOf(defaultFolder) }
+    var connections by remember { mutableIntStateOf(defaultConnections) }
     var autoStart by remember { mutableStateOf(true) }
     var connectionsExpanded by remember { mutableStateOf(false) }
 
@@ -497,34 +501,72 @@ private fun AddDownloadScreen(
 }
 
 @Composable
-private fun SettingsScreen() {
+private fun SettingsScreen(vm: MainViewModel) {
     val context = LocalContext.current
-    var wifiOnly by remember { mutableStateOf(false) }
-    var notifications by remember { mutableStateOf(true) }
-    var autoResume by remember { mutableStateOf(true) }
-    var retryAttempts by remember { mutableIntStateOf(3) }
+    val settings = vm.settings
+
+    var wifiOnly by remember { mutableStateOf(settings.wifiOnly) }
+    var notifications by remember { mutableStateOf(settings.notifications) }
+    var autoResume by remember { mutableStateOf(settings.autoResume) }
+    var retryAttempts by remember { mutableIntStateOf(settings.retryAttempts) }
+    var defaultConnections by remember { mutableIntStateOf(settings.defaultConnections) }
+    var defaultFolder by remember { mutableStateOf(settings.defaultFolderUri) }
+
+    var connectionsMenu by remember { mutableStateOf(false) }
+    var retryMenu by remember { mutableStateOf(false) }
+
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            settings.defaultFolderUri = uri.toString()
+            defaultFolder = uri.toString()
+        }
+    }
+
+    val folderLabel = defaultFolder?.let { Uri.parse(it).lastPathSegment ?: it } ?: "/storage/emulated/0/Download"
 
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
         Text("Settings", color = TextPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(16.dp))
 
         SettingsSection(title = "Download settings") {
-            SettingsRow(icon = Icons.Default.Speed, title = "Parallel connections", subtitle = "8 (recommended)")
-            SettingsRow(icon = Icons.Default.Folder, title = "Download folder", subtitle = "/storage/emulated/0/Download")
-            SettingsToggleRow(icon = Icons.Default.Wifi, title = "Wi-Fi only", subtitle = "Download only on Wi-Fi", checked = wifiOnly, onCheckedChange = { wifiOnly = it })
+            Box {
+                SettingsRow(
+                    icon = Icons.Default.Speed, title = "Parallel connections",
+                    subtitle = "$defaultConnections" + if (defaultConnections == 8) " (recommended)" else "",
+                    onClick = { connectionsMenu = true }
+                )
+                DropdownMenu(expanded = connectionsMenu, onDismissRequest = { connectionsMenu = false }) {
+                    listOf(2, 4, 6, 8, 16).forEach { n ->
+                        DropdownMenuItem(text = { Text("$n threads" + if (n == 8) " (recommended)" else "") }, onClick = {
+                            defaultConnections = n; settings.defaultConnections = n; connectionsMenu = false
+                        })
+                    }
+                }
+            }
+            SettingsRow(icon = Icons.Default.Folder, title = "Download folder", subtitle = folderLabel, onClick = { folderPicker.launch(null) })
+            SettingsToggleRow(icon = Icons.Default.Wifi, title = "Wi-Fi only", subtitle = "Download only on Wi-Fi", checked = wifiOnly, onCheckedChange = { wifiOnly = it; settings.wifiOnly = it })
         }
 
         Spacer(Modifier.height(20.dp))
         SettingsSection(title = "General") {
             SettingsRow(icon = Icons.Default.Palette, title = "Appearance", subtitle = "Dark theme")
             SettingsRow(icon = Icons.Default.Language, title = "Language", subtitle = "English")
-            SettingsToggleRow(icon = Icons.Default.Notifications, title = "Notifications", subtitle = "Enable download notifications", checked = notifications, onCheckedChange = { notifications = it })
+            SettingsToggleRow(icon = Icons.Default.Notifications, title = "Notifications", subtitle = "Enable download notifications", checked = notifications, onCheckedChange = { notifications = it; settings.notifications = it })
         }
 
         Spacer(Modifier.height(20.dp))
         SettingsSection(title = "Advanced") {
-            SettingsToggleRow(icon = Icons.Default.Autorenew, title = "Auto resume", subtitle = "Resume after app restart", checked = autoResume, onCheckedChange = { autoResume = it })
-            SettingsRow(icon = Icons.Default.Replay, title = "Retry on failure", subtitle = "$retryAttempts attempts")
+            SettingsToggleRow(icon = Icons.Default.Autorenew, title = "Auto resume", subtitle = "Resume after app restart", checked = autoResume, onCheckedChange = { autoResume = it; settings.autoResume = it })
+            Box {
+                SettingsRow(icon = Icons.Default.Replay, title = "Retry on failure", subtitle = "$retryAttempts attempts", onClick = { retryMenu = true })
+                DropdownMenu(expanded = retryMenu, onDismissRequest = { retryMenu = false }) {
+                    listOf(0, 1, 2, 3, 5).forEach { n ->
+                        DropdownMenuItem(text = { Text("$n attempts") }, onClick = {
+                            retryAttempts = n; settings.retryAttempts = n; retryMenu = false
+                        })
+                    }
+                }
+            }
         }
 
         Spacer(Modifier.height(24.dp))
@@ -559,15 +601,20 @@ private fun SettingsSection(title: String, content: @Composable ColumnScope.() -
 }
 
 @Composable
-private fun SettingsRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, subtitle: String) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun SettingsRow(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, subtitle: String, onClick: (() -> Unit)? = null) {
+    Row(
+        Modifier.fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Icon(icon, null, tint = AccentBlue, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(title, color = TextPrimary)
             Text(subtitle, color = TextSecondary, style = MaterialTheme.typography.labelSmall)
         }
-        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = TextSecondary)
+        if (onClick != null) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = TextSecondary)
     }
 }
 
