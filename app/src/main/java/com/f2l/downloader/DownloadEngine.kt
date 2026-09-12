@@ -9,6 +9,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.BufferedInputStream
@@ -78,7 +79,7 @@ class DownloadEngine(private val context: Context) {
                     var last = downloaded
                     var lastT = System.nanoTime()
                     while (true) {
-                        ensureActive()
+                        coroutineContext.ensureActive()
                         val n = input.read(buffer)
                         if (n < 0) break
                         out.write(buffer, 0, n)
@@ -180,7 +181,7 @@ class DownloadEngine(private val context: Context) {
                     val buffer = ByteArray(128 * 1024)
                     var got = existing
                     while (got < end - start + 1) {
-                        ensureActive()
+                        coroutineContext.ensureActive()
                         val wanted = min(buffer.size.toLong(), end - start + 1 - got).toInt()
                         val n = input.read(buffer, 0, wanted)
                         if (n < 0) break
