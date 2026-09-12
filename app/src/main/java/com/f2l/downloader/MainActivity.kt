@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 DownloadService.ACTION_FINISHED ->
-                    vm.update(id) { it.copy(status = DownloadItem.Status.COMPLETED, speedBytesPerSec = 0, etaSeconds = -1) }
+                    vm.update(id) { it.copy(status = DownloadItem.Status.COMPLETED, downloadedBytes = it.totalBytes.coerceAtLeast(it.downloadedBytes), speedBytesPerSec = 0, etaSeconds = -1) }
                 DownloadService.ACTION_FAILED ->
                     vm.update(id) { it.copy(status = DownloadItem.Status.FAILED, error = intent.getStringExtra("error")) }
             }
@@ -256,6 +256,13 @@ private fun DownloadListScreen(
         }
     }
 
+    var selected by remember { mutableStateOf<DownloadItem?>(null) }
+    selected?.let { sel ->
+        val live = items.find { it.id == sel.id } ?: sel
+        DownloadDetailScreen(live, onBack = { selected = null }, onPause = { vm.pause(live) }, onResume = { vm.start(live) }, onDelete = { vm.delete(live); selected = null })
+        return
+    }
+
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         if (showFilters) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -286,7 +293,8 @@ private fun DownloadListScreen(
                         item,
                         onPause = { vm.pause(item) },
                         onResume = { vm.start(item) },
-                        onDelete = { vm.delete(item) }
+                        onDelete = { vm.delete(item) },
+                        onClick = { selected = item }
                     )
                 }
             }
@@ -295,7 +303,7 @@ private fun DownloadListScreen(
 }
 
 @Composable
-private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit) {
+private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onClick: () -> Unit) {
     val progress = if (item.totalBytes > 0)
         (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
 
@@ -309,7 +317,7 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
     }
 
     Card(
-        Modifier.fillMaxWidth(),
+        Modifier.fillMaxWidth().clickable(onClick = onClick),
         colors = CardDefaults.cardColors(containerColor = Surface1),
         shape = RoundedCornerShape(14.dp)
     ) {
@@ -337,6 +345,19 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                 Text(statusLabel, color = statusColor, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            }
+            if (item.status == DownloadItem.Status.DOWNLOADING) {
+                Spacer(Modifier.height(4.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(
+                        if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else "Calculating speed…",
+                        color = TextSecondary, style = MaterialTheme.typography.labelSmall
+                    )
+                    Text(
+                        if (item.etaSeconds > 0) "ETA ${formatDuration(item.etaSeconds)}" else "",
+                        color = TextSecondary, style = MaterialTheme.typography.labelSmall
+                    )
+                }
             }
             if (item.error != null) {
                 Spacer(Modifier.height(4.dp))
@@ -630,6 +651,88 @@ private fun SettingsToggleRow(icon: androidx.compose.ui.graphics.vector.ImageVec
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange, colors = SwitchDefaults.colors(checkedTrackColor = AccentBlue))
     }
+}
+
+@Composable
+private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit) {
+    val progress = if (item.totalBytes > 0) (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
+    val (statusColor, statusLabel) = when (item.status) {
+        DownloadItem.Status.DOWNLOADING -> AccentBlue to "Downloading"
+        DownloadItem.Status.PAUSED -> AmberWarn to "Paused"
+        DownloadItem.Status.COMPLETED -> GreenOk to "Completed"
+        DownloadItem.Status.FAILED -> RedErr to "Failed"
+        DownloadItem.Status.QUEUED -> TextSecondary to "Queued"
+        DownloadItem.Status.CANCELED -> TextSecondary to "Canceled"
+    }
+
+    Scaffold(
+        containerColor = BgDark,
+        topBar = {
+            TopAppBar(
+                title = { Text(item.fileName, maxLines = 1) },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark, titleContentColor = TextPrimary),
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) } },
+                actions = { IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Delete", tint = RedErr) } }
+            )
+        }
+    ) { pad ->
+        Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
+            Box(Modifier.fillMaxWidth().height(70.dp).clip(RoundedCornerShape(14.dp)).background(statusColor.copy(alpha = 0.15f)), contentAlignment = Alignment.Center) {
+                Icon(fileTypeIcon(item.fileName), null, tint = statusColor, modifier = Modifier.size(32.dp))
+            }
+            Spacer(Modifier.height(16.dp))
+
+            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)), color = statusColor, trackColor = Surface2)
+            Spacer(Modifier.height(6.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("${(progress * 100).toInt()}%", color = statusColor, fontWeight = FontWeight.Bold)
+                Text(statusLabel, color = statusColor, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(20.dp))
+
+            DetailRow("Status", statusLabel, statusColor)
+            DetailRow("Downloaded", "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}")
+            if (item.status == DownloadItem.Status.DOWNLOADING) {
+                DetailRow("Speed", if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else "Calculating…")
+                DetailRow("ETA", if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else "Calculating…")
+            }
+            DetailRow("Connections", "${item.connections} threads")
+            DetailRow("File name", item.fileName)
+            DetailRow("Save folder", Uri.parse(item.folderUri).lastPathSegment ?: item.folderUri)
+            DetailRow("Source URL", item.url)
+            if (item.error != null) DetailRow("Error", item.error!!, RedErr)
+
+            Spacer(Modifier.height(24.dp))
+            when (item.status) {
+                DownloadItem.Status.DOWNLOADING -> OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text("Pause", color = TextPrimary)
+                }
+                DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> Button(
+                    onClick = onResume, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                ) {
+                    Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(if (item.status == DownloadItem.Status.FAILED) "Retry" else "Resume")
+                }
+                else -> {}
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailRow(label: String, value: String, valueColor: Color = TextPrimary) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        Text(label, color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+        Spacer(Modifier.height(2.dp))
+        Text(value, color = valueColor, style = MaterialTheme.typography.bodyMedium)
+    }
+    HorizontalDivider(color = Surface2)
+}
+
+private fun formatDuration(totalSeconds: Long): String {
+    val h = totalSeconds / 3600
+    val m = (totalSeconds % 3600) / 60
+    val s = totalSeconds % 60
+    return if (h > 0) String.format(Locale.US, "%d:%02d:%02d", h, m, s) else String.format(Locale.US, "%d:%02d", m, s)
 }
 
 private fun formatBytes(bytes: Long): String {

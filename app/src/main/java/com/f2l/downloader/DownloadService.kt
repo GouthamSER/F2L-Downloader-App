@@ -87,9 +87,26 @@ class DownloadService : Service() {
                 jobs[id] = job
             }
             ACTION_PAUSE -> jobs[id]?.cancel()
-            ACTION_CANCEL -> jobs[id]?.cancel()
+            ACTION_CANCEL -> {
+                jobs[id]?.cancel()
+                val tree = intent.getStringExtra("tree")
+                val name = intent.getStringExtra("name")
+                if (tree != null && name != null) deleteDownloadFiles(tree, name)
+            }
         }
         return START_NOT_STICKY
+    }
+
+    /** Deletes the finished file plus any leftover .f2l.part segment files for this download. */
+    private fun deleteDownloadFiles(treeUri: String, fileName: String) {
+        try {
+            val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, Uri.parse(treeUri)) ?: return
+            tree.findFile(fileName)?.delete()
+            tree.listFiles().forEach { f ->
+                val n = f.name ?: return@forEach
+                if (n == "$fileName.f2l.part" || n.startsWith("$fileName.f2l.part")) f.delete()
+            }
+        } catch (_: Exception) { /* best effort */ }
     }
 
     private fun notification(text: String): Notification =

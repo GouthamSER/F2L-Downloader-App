@@ -80,6 +80,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             Intent(getApplication(), DownloadService::class.java)
                 .setAction(DownloadService.ACTION_CANCEL)
                 .putExtra("id", item.id)
+                .putExtra("tree", item.folderUri)
+                .putExtra("name", item.fileName)
         )
         setItems(_items.value.filterNot { it.id == item.id })
     }
