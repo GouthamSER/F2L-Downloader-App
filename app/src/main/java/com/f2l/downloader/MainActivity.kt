@@ -143,7 +143,6 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
 
     if (showAddScreen) {
         AddDownloadScreen(
-            vm = vm,
             initialUrl = prefillUrl,
             defaultConnections = vm.settings.defaultConnections,
             defaultFolder = vm.settings.defaultFolderUri?.let { runCatching { Uri.parse(it) }.getOrNull() },
@@ -406,14 +405,12 @@ private fun FilesScreen(items: List<DownloadItem>) {
 
 @Composable
 private fun AddDownloadScreen(
-    vm: MainViewModel,
     initialUrl: String,
     defaultConnections: Int = 8,
     defaultFolder: Uri? = null,
     onBack: () -> Unit,
     onStart: (url: String, name: String, folder: Uri, connections: Int, autoStart: Boolean) -> Unit
 ) {
-    val context = LocalContext.current
     var url by remember { mutableStateOf(initialUrl) }
     var fileName by remember { mutableStateOf("") }
     var folder by remember { mutableStateOf(defaultFolder) }
@@ -424,17 +421,8 @@ private fun AddDownloadScreen(
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) folder = uri
     }
-    val torrentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "torrent-${System.currentTimeMillis()}.torrent"
-            if (bytes != null) { vm.addTorrent(bytes, name); onBack() }
-        }
-    }
 
-    val isMagnet = url.trim().startsWith("magnet:")
-    val urlValid = isMagnet || url.startsWith("http://") || url.startsWith("https://")
-    val ariaActive = isMagnet || vm.settings.aria2Enabled
+    val urlValid = url.startsWith("http://") || url.startsWith("https://")
 
     Scaffold(
         containerColor = BgDark,
@@ -448,25 +436,14 @@ private fun AddDownloadScreen(
             )
         }
     ) { pad ->
-        Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
-            Text("URL or magnet link", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+        Column(Modifier.padding(pad).padding(16.dp).fillMaxSize()) {
+            Text("URL", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
             OutlinedTextField(
                 value = url, onValueChange = { url = it },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
-                placeholder = { Text("https://example.com/file.zip or magnet:?xt=...") }
+                placeholder = { Text("https://example.com/file.zip") }
             )
-            if (isMagnet) {
-                Spacer(Modifier.height(4.dp))
-                Text("Magnet link — will be sent to aria2", color = AccentBlue, style = MaterialTheme.typography.labelSmall)
-            }
-            Spacer(Modifier.height(16.dp))
-
-            OutlinedButton(onClick = { torrentPicker.launch(arrayOf("application/x-bittorrent")) }, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Default.FolderZip, null, tint = TextPrimary)
-                Spacer(Modifier.width(8.dp))
-                Text("Or pick a .torrent file", color = TextPrimary)
-            }
             Spacer(Modifier.height(16.dp))
 
             Text("File name (optional)", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
@@ -478,37 +455,30 @@ private fun AddDownloadScreen(
             )
             Spacer(Modifier.height(16.dp))
 
-            if (!isMagnet) {
-                Text("Save to", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(4.dp))
-                OutlinedButton(onClick = { picker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Folder, null, tint = TextPrimary)
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (folder == null) "Choose folder" else "Folder selected", color = TextPrimary)
-                }
-                Spacer(Modifier.height(16.dp))
+            Text("Save to", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.height(4.dp))
+            OutlinedButton(onClick = { picker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.Folder, null, tint = TextPrimary)
+                Spacer(Modifier.width(8.dp))
+                Text(if (folder == null) "Choose folder" else "Folder selected", color = TextPrimary)
             }
+            Spacer(Modifier.height(16.dp))
 
-            if (!ariaActive) {
-                Text("Connections", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(4.dp))
-                Box {
-                    OutlinedButton(onClick = { connectionsExpanded = true }, modifier = Modifier.fillMaxWidth()) {
-                        Text("$connections threads" + if (connections == 8) " (recommended)" else "", color = TextPrimary, modifier = Modifier.weight(1f))
-                        Icon(Icons.Default.ArrowDropDown, null, tint = TextPrimary)
-                    }
-                    DropdownMenu(expanded = connectionsExpanded, onDismissRequest = { connectionsExpanded = false }) {
-                        listOf(2, 4, 6, 8, 16).forEach { n ->
-                            DropdownMenuItem(text = { Text("$n threads" + if (n == 8) " (recommended)" else "") }, onClick = { connections = n; connectionsExpanded = false })
-                        }
+            Text("Connections", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.height(4.dp))
+            Box {
+                OutlinedButton(onClick = { connectionsExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text("$connections threads" + if (connections == 8) " (recommended)" else "", color = TextPrimary, modifier = Modifier.weight(1f))
+                    Icon(Icons.Default.ArrowDropDown, null, tint = TextPrimary)
+                }
+                DropdownMenu(expanded = connectionsExpanded, onDismissRequest = { connectionsExpanded = false }) {
+                    listOf(2, 4, 6, 8, 16).forEach { n ->
+                        DropdownMenuItem(text = { Text("$n threads" + if (n == 8) " (recommended)" else "") }, onClick = { connections = n; connectionsExpanded = false })
                     }
                 }
-                Text("More connections = faster download (works best for large files)", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-                Spacer(Modifier.height(16.dp))
-            } else {
-                Text("Handled by aria2 — saves to ${vm.settings.aria2SaveDir}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-                Spacer(Modifier.height(16.dp))
             }
+            Text("More connections = faster download (works best for large files)", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+            Spacer(Modifier.height(16.dp))
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Start download immediately", color = TextPrimary)
@@ -517,11 +487,11 @@ private fun AddDownloadScreen(
                     colors = SwitchDefaults.colors(checkedTrackColor = AccentBlue)
                 )
             }
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.weight(1f))
 
             Button(
-                onClick = { onStart(url.trim(), fileName, folder ?: Uri.EMPTY, connections, autoStart) },
-                enabled = urlValid && (isMagnet || folder != null),
+                onClick = { folder?.let { onStart(url.trim(), fileName, it, connections, autoStart) } },
+                enabled = urlValid && folder != null,
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
             ) {
@@ -600,9 +570,6 @@ private fun SettingsScreen(vm: MainViewModel) {
             }
         }
 
-        Spacer(Modifier.height(20.dp))
-        Aria2SettingsSection(vm)
-
         Spacer(Modifier.height(24.dp))
         Card(colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(14.dp)) {
             Column(Modifier.padding(16.dp)) {
@@ -622,60 +589,6 @@ private fun SettingsScreen(vm: MainViewModel) {
             }
         }
         Spacer(Modifier.height(24.dp))
-    }
-}
-
-@Composable
-private fun Aria2SettingsSection(vm: MainViewModel) {
-    val settings = vm.settings
-    var enabled by remember { mutableStateOf(settings.aria2Enabled) }
-    var host by remember { mutableStateOf(settings.aria2Host) }
-    var port by remember { mutableStateOf(settings.aria2Port.toString()) }
-    var secret by remember { mutableStateOf(settings.aria2Secret) }
-    var saveDir by remember { mutableStateOf(settings.aria2SaveDir) }
-    var testResult by remember { mutableStateOf<String?>(null) }
-    val scope = rememberCoroutineScope()
-
-    Text("aria2 engine", color = TextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-    Spacer(Modifier.height(8.dp))
-    Card(colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(14.dp)) {
-        Column(Modifier.padding(16.dp)) {
-            Text("Requires a running aria2c you point this at — bundled binary or a remote/PC daemon. Not included in this app.", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-            Spacer(Modifier.height(12.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Use aria2 for all downloads", color = TextPrimary)
-                Switch(checked = enabled, onCheckedChange = { enabled = it; settings.aria2Enabled = it }, colors = SwitchDefaults.colors(checkedTrackColor = AccentBlue))
-            }
-            Text("Magnet links always use aria2 regardless of this toggle.", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-            Spacer(Modifier.height(12.dp))
-
-            OutlinedTextField(value = host, onValueChange = { host = it; settings.aria2Host = it }, label = { Text("Host") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = port, onValueChange = { port = it; it.toIntOrNull()?.let { p -> settings.aria2Port = p } },
-                label = { Text("Port") }, modifier = Modifier.fillMaxWidth(), singleLine = true
-            )
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(value = secret, onValueChange = { secret = it; settings.aria2Secret = it }, label = { Text("RPC secret (optional)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(value = saveDir, onValueChange = { saveDir = it; settings.aria2SaveDir = it }, label = { Text("Save directory (device path)") }, modifier = Modifier.fillMaxWidth(), singleLine = true)
-            Spacer(Modifier.height(12.dp))
-
-            OutlinedButton(
-                onClick = {
-                    testResult = "Checking…"
-                    scope.launch {
-                        val ok = runCatching { Aria2Client(host, port.toIntOrNull() ?: 6800, secret.ifBlank { null }).ping() }.getOrDefault(false)
-                        testResult = if (ok) "Connected ✓" else "Could not reach aria2 at $host:$port"
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Test connection", color = TextPrimary) }
-            testResult?.let {
-                Spacer(Modifier.height(6.dp))
-                Text(it, color = if (it.contains("Connected")) GreenOk else RedErr, style = MaterialTheme.typography.labelSmall)
-            }
-        }
     }
 }
 

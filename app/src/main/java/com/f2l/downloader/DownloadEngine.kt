@@ -5,7 +5,9 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -140,6 +142,25 @@ class DownloadEngine(private val context: Context) {
         onProgress: (Progress) -> Unit
     ) = coroutineScope {
         val chunk = (total + count - 1) / count
+        val downloadedTotal = java.util.concurrent.atomic.AtomicLong(0L)
+
+        // one shared ticker reports aggregate progress + real speed every ~500ms,
+        // instead of every worker hitting DocumentFile I/O on every 128KB read.
+        val reporter = launch {
+            var last = 0L
+            var lastT = System.nanoTime()
+            while (isActive) {
+                delay(500)
+                val now = System.nanoTime()
+                val downloaded = downloadedTotal.get()
+                val sec = (now - lastT) / 1e9
+                val speed = if (sec > 0) ((downloaded - last) / sec).toLong() else 0L
+                onProgress(Progress(downloaded, total, speed))
+                last = downloaded
+                lastT = now
+            }
+        }
+
         val jobs = (0 until count).map { index ->
             launch(Dispatchers.IO) {
                 val start = index * chunk
@@ -156,13 +177,17 @@ class DownloadEngine(private val context: Context) {
                     val fresh = tree.createFile("application/octet-stream", partName)
                         ?: error("Cannot recreate segment")
                     existing = 0L
-                    downloadRange(url, fresh, start, end, existing, onProgress, tree, fileName, count)
-                } else if (existing < expected) {
-                    downloadRange(url, part, start, end, existing, onProgress, tree, fileName, count)
+                    downloadedTotal.addAndGet(0L)
+                    downloadRange(url, fresh, start, end, existing, downloadedTotal)
+                } else {
+                    if (existing > 0) downloadedTotal.addAndGet(existing)
+                    if (existing < expected) downloadRange(url, part, start, end, existing, downloadedTotal)
                 }
             }
         }
         jobs.joinAll()
+        reporter.cancel()
+        onProgress(Progress(downloadedTotal.get(), total, 0))
 
         val final = tree.findFile(fileName)
         final?.delete()
@@ -188,10 +213,7 @@ class DownloadEngine(private val context: Context) {
         start: Long,
         end: Long,
         existing: Long,
-        onProgress: (Progress) -> Unit,
-        tree: DocumentFile,
-        fileName: String,
-        count: Int
+        downloadedTotal: java.util.concurrent.atomic.AtomicLong
     ) {
         val from = start + existing
         val request = Request.Builder().url(url)
@@ -213,13 +235,10 @@ class DownloadEngine(private val context: Context) {
                         if (n < 0) break
                         sink.write(buffer, 0, n)
                         got += n
-                        onProgress(Progress(estimateTotal(tree, fileName, count), -1L, 0))
+                        downloadedTotal.addAndGet(n.toLong())
                     }
                 }
             }
         }
     }
-
-    private fun estimateTotal(tree: DocumentFile, fileName: String, count: Int): Long =
-        (0 until count).sumOf { tree.findFile("$fileName.f2l.part$it")?.length() ?: 0L }
 }

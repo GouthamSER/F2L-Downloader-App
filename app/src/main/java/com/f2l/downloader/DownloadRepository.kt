@@ -23,9 +23,7 @@ class DownloadRepository(context: Context) {
                         DownloadItem.Status.valueOf(o.optString("status", "QUEUED"))
                     }.getOrDefault(DownloadItem.Status.QUEUED),
                     error = o.optString("error", null),
-                    connections = o.optInt("connections", 8),
-                    engine = runCatching { DownloadItem.Engine.valueOf(o.optString("engine", "HTTP")) }.getOrDefault(DownloadItem.Engine.HTTP),
-                    gid = o.optString("gid", null)
+                    connections = o.optInt("connections", 8)
                 ))
             }
         }
@@ -43,8 +41,6 @@ class DownloadRepository(context: Context) {
                 put("downloadedBytes", item.downloadedBytes)
                 put("status", item.status.name)
                 put("connections", item.connections)
-                put("engine", item.engine.name)
-                if (item.gid != null) put("gid", item.gid)
                 if (item.error != null) put("error", item.error)
             })
         }
