@@ -1,0 +1,94 @@
+package com.f2l.downloader
+
+import android.app.*
+import android.content.*
+import android.net.Uri
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.*
+import java.util.concurrent.ConcurrentHashMap
+
+class DownloadService : Service() {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private lateinit var engine: DownloadEngine
+
+    companion object {
+        private val jobs = ConcurrentHashMap<Long, Job>()
+        const val ACTION_START = "START"
+        const val ACTION_PAUSE = "PAUSE"
+        const val ACTION_CANCEL = "CANCEL"
+        const val ACTION_PROGRESS = "com.f2l.DOWNLOAD_PROGRESS"
+        const val ACTION_FINISHED = "com.f2l.DOWNLOAD_FINISHED"
+        const val ACTION_FAILED = "com.f2l.DOWNLOAD_FAILED"
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        engine = DownloadEngine(this)
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel("downloads", "Downloads", NotificationManager.IMPORTANCE_LOW)
+        )
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val id = intent?.getLongExtra("id", 0L) ?: return START_NOT_STICKY
+        when (intent.action) {
+            ACTION_START -> {
+                val url = intent.getStringExtra("url") ?: return START_NOT_STICKY
+                val name = intent.getStringExtra("name") ?: "download.bin"
+                val tree = intent.getStringExtra("tree") ?: return START_NOT_STICKY
+                val connections = intent.getIntExtra("connections", 8)
+                if (jobs.containsKey(id)) return START_NOT_STICKY
+
+                startForeground(1001, notification("Downloading $name"))
+                val job = scope.launch {
+                    try {
+                        engine.download(url, name, Uri.parse(tree), connections) { p ->
+                            sendBroadcast(Intent(ACTION_PROGRESS).apply {
+                                setPackage(packageName)
+                                putExtra("id", id)
+                                putExtra("downloaded", p.downloaded)
+                                putExtra("total", p.total)
+                                putExtra("speed", p.speed)
+                            })
+                            val percent = if (p.total > 0) p.downloaded * 100 / p.total else 0
+                            getSystemService(NotificationManager::class.java)
+                                .notify(1001, notification("$name • $percent%"))
+                        }
+                        sendBroadcast(Intent(ACTION_FINISHED).setPackage(packageName).putExtra("id", id))
+                    } catch (e: CancellationException) {
+                        sendBroadcast(Intent(ACTION_PROGRESS).setPackage(packageName)
+                            .putExtra("id", id).putExtra("paused", true))
+                    } catch (e: Exception) {
+                        sendBroadcast(Intent(ACTION_FAILED).setPackage(packageName)
+                            .putExtra("id", id).putExtra("error", e.message ?: "Download failed"))
+                    } finally {
+                        jobs.remove(id)
+                        if (jobs.isEmpty()) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            stopSelf()
+                        }
+                    }
+                }
+                jobs[id] = job
+            }
+            ACTION_PAUSE -> jobs[id]?.cancel()
+            ACTION_CANCEL -> jobs[id]?.cancel()
+        }
+        return START_NOT_STICKY
+    }
+
+    private fun notification(text: String): Notification =
+        NotificationCompat.Builder(this, "downloads")
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle("F2L Downloader")
+            .setContentText(text)
+            .setOngoing(true)
+            .build()
+
+    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onDestroy() {
+        scope.cancel()
+        super.onDestroy()
+    }
+}
