@@ -28,4 +28,14 @@ class SettingsRepository(context: Context) {
     var defaultFolderUri: String?
         get() = prefs.getString("default_folder", null)
         set(v) = prefs.edit().putString("default_folder", v).apply()
+
+    /** "dark" or "light" */
+    var themeMode: String
+        get() = prefs.getString("theme_mode", "dark") ?: "dark"
+        set(v) = prefs.edit().putString("theme_mode", v).apply()
+
+    /** BCP-47 tag, e.g. "en", "hi", "ml", "ta" */
+    var languageTag: String
+        get() = prefs.getString("language_tag", "en") ?: "en"
+        set(v) = prefs.edit().putString("language_tag", v).apply()
 }

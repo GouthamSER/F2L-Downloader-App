@@ -13,6 +13,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,6 +33,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -45,27 +47,50 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 // ---- palette matching the reference design (deep navy + blue accent) ----
-private val BgDark = Color(0xFF0B0D12)
-private val Surface1 = Color(0xFF121722)
-private val Surface2 = Color(0xFF171D2B)
+// mutable so a theme-mode change (see applyPalette) can flip every screen at once via recreate()
+private var BgDark = Color(0xFF0B0D12)
+private var Surface1 = Color(0xFF121722)
+private var Surface2 = Color(0xFF171D2B)
 private val AccentBlue = Color(0xFF2F7BFF)
-private val TextPrimary = Color(0xFFEFF2F7)
-private val TextSecondary = Color(0xFF8B93A7)
+private var TextPrimary = Color(0xFFEFF2F7)
+private var TextSecondary = Color(0xFF8B93A7)
 private val GreenOk = Color(0xFF33C481)
 private val AmberWarn = Color(0xFFF2A93B)
 private val RedErr = Color(0xFFE0554F)
+private var isLightMode = false
 
-private val F2LColors = darkColorScheme(
-    background = BgDark,
-    surface = Surface1,
-    surfaceVariant = Surface2,
-    primary = AccentBlue,
-    onPrimary = Color.White,
-    onBackground = TextPrimary,
-    onSurface = TextPrimary,
-    secondary = TextSecondary,
-    error = RedErr
-)
+private fun applyPalette(mode: String) {
+    isLightMode = mode == "light"
+    if (isLightMode) {
+        BgDark = Color(0xFFF5F6F9)
+        Surface1 = Color(0xFFFFFFFF)
+        Surface2 = Color(0xFFE9ECF2)
+        TextPrimary = Color(0xFF10131A)
+        TextSecondary = Color(0xFF5A6270)
+    } else {
+        BgDark = Color(0xFF0B0D12)
+        Surface1 = Color(0xFF121722)
+        Surface2 = Color(0xFF171D2B)
+        TextPrimary = Color(0xFFEFF2F7)
+        TextSecondary = Color(0xFF8B93A7)
+    }
+}
+
+private fun colorScheme() = if (isLightMode) {
+    lightColorScheme(
+        background = BgDark, surface = Surface1, surfaceVariant = Surface2,
+        primary = AccentBlue, onPrimary = Color.White,
+        onBackground = TextPrimary, onSurface = TextPrimary,
+        secondary = TextSecondary, error = RedErr
+    )
+} else {
+    darkColorScheme(
+        background = BgDark, surface = Surface1, surfaceVariant = Surface2,
+        primary = AccentBlue, onPrimary = Color.White,
+        onBackground = TextPrimary, onSurface = TextPrimary,
+        secondary = TextSecondary, error = RedErr
+    )
+}
 
 class MainActivity : ComponentActivity() {
     private val vm by viewModels<MainViewModel>()
@@ -97,13 +122,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        applyPalette(SettingsRepository(application).themeMode)
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 44)
         }
         if (intent?.action == Intent.ACTION_SEND) incomingUrl = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
         setContent {
-            MaterialTheme(colorScheme = F2LColors) {
+            MaterialTheme(colorScheme = colorScheme()) {
                 F2LApp(vm, incomingUrl)
             }
         }
@@ -307,6 +333,20 @@ private fun DownloadListScreen(
 }
 
 @Composable
+private fun F2LProgressBar(progress: Float, color: Color, height: androidx.compose.ui.unit.Dp = 10.dp) {
+    val animated by animateFloatAsState(targetValue = progress.coerceIn(0f, 1f), label = "progress")
+    Box(
+        Modifier.fillMaxWidth().height(height).clip(RoundedCornerShape(50)).background(Surface2)
+    ) {
+        Box(
+            Modifier.fillMaxHeight().fillMaxWidth(animated.coerceIn(0.03f, 1f))
+                .clip(RoundedCornerShape(50))
+                .background(Brush.horizontalGradient(listOf(color.copy(alpha = 0.75f), color)))
+        )
+    }
+}
+
+@Composable
 private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onClick: () -> Unit) {
     val progress = if (item.totalBytes > 0)
         (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
@@ -341,10 +381,7 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
                 IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Delete", tint = TextSecondary) }
             }
             Spacer(Modifier.height(10.dp))
-            LinearProgressIndicator(
-                progress = { progress }, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)),
-                color = statusColor, trackColor = Surface2
-            )
+            F2LProgressBar(progress = progress, color = statusColor, height = 8.dp)
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
@@ -546,6 +583,12 @@ private fun SettingsScreen(vm: MainViewModel) {
 
     var connectionsMenu by remember { mutableStateOf(false) }
     var retryMenu by remember { mutableStateOf(false) }
+    var appearanceMenu by remember { mutableStateOf(false) }
+    var languageMenu by remember { mutableStateOf(false) }
+    var themeMode by remember { mutableStateOf(settings.themeMode) }
+    var languageTag by remember { mutableStateOf(settings.languageTag) }
+
+    val languages = listOf("en" to "English", "hi" to "हिन्दी (Hindi)", "ml" to "മലയാളം (Malayalam)", "ta" to "தமிழ் (Tamil)")
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -584,10 +627,42 @@ private fun SettingsScreen(vm: MainViewModel) {
 
         Spacer(Modifier.height(20.dp))
         SettingsSection(title = "General") {
-            SettingsRow(icon = Icons.Default.Palette, title = "Appearance", subtitle = "Dark theme")
-            SettingsRow(icon = Icons.Default.Language, title = "Language", subtitle = "English")
+            Box {
+                SettingsRow(icon = Icons.Default.Palette, title = "Appearance", subtitle = if (themeMode == "light") "Light theme" else "Dark theme", onClick = { appearanceMenu = true })
+                DropdownMenu(expanded = appearanceMenu, onDismissRequest = { appearanceMenu = false }) {
+                    DropdownMenuItem(text = { Text("Dark theme") }, onClick = {
+                        appearanceMenu = false
+                        if (themeMode != "dark") { themeMode = "dark"; settings.themeMode = "dark"; (context as? android.app.Activity)?.recreate() }
+                    })
+                    DropdownMenuItem(text = { Text("Light theme") }, onClick = {
+                        appearanceMenu = false
+                        if (themeMode != "light") { themeMode = "light"; settings.themeMode = "light"; (context as? android.app.Activity)?.recreate() }
+                    })
+                }
+            }
+            Box {
+                SettingsRow(
+                    icon = Icons.Default.Language, title = "Language",
+                    subtitle = languages.find { it.first == languageTag }?.second ?: "English",
+                    onClick = { languageMenu = true }
+                )
+                DropdownMenu(expanded = languageMenu, onDismissRequest = { languageMenu = false }) {
+                    languages.forEach { (tag, label) ->
+                        DropdownMenuItem(text = { Text(label) }, onClick = {
+                            languageMenu = false
+                            languageTag = tag
+                            settings.languageTag = tag
+                            androidx.appcompat.app.AppCompatDelegate.setApplicationLocales(
+                                androidx.core.os.LocaleListCompat.forLanguageTags(tag)
+                            )
+                        })
+                    }
+                }
+            }
             SettingsToggleRow(icon = Icons.Default.Notifications, title = "Notifications", subtitle = "Enable download notifications", checked = notifications, onCheckedChange = { notifications = it; settings.notifications = it })
         }
+        Spacer(Modifier.height(6.dp))
+        Text("App text is currently English-only; language switch affects the system locale for now.", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
 
         Spacer(Modifier.height(20.dp))
         SettingsSection(title = "Advanced") {
@@ -690,30 +765,39 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
         }
     ) { pad ->
         Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
-            Box(Modifier.fillMaxWidth().height(70.dp).clip(RoundedCornerShape(14.dp)).background(statusColor.copy(alpha = 0.15f)), contentAlignment = Alignment.Center) {
-                Icon(fileTypeIcon(item.fileName), null, tint = statusColor, modifier = Modifier.size(32.dp))
+            Box(
+                Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(20.dp))
+                    .background(Brush.verticalGradient(listOf(statusColor.copy(alpha = 0.22f), Surface1))),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(
+                        Modifier.size(52.dp).clip(RoundedCornerShape(16.dp)).background(statusColor.copy(alpha = 0.2f)),
+                        contentAlignment = Alignment.Center
+                    ) { Icon(fileTypeIcon(item.fileName), null, tint = statusColor, modifier = Modifier.size(26.dp)) }
+                    Spacer(Modifier.height(10.dp))
+                    Text("${(progress * 100).toInt()}%", color = TextPrimary, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                    Text(statusLabel, color = statusColor, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                }
             }
             Spacer(Modifier.height(16.dp))
-
-            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)), color = statusColor, trackColor = Surface2)
-            Spacer(Modifier.height(6.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("${(progress * 100).toInt()}%", color = statusColor, fontWeight = FontWeight.Bold)
-                Text(statusLabel, color = statusColor, fontWeight = FontWeight.Bold)
-            }
+            F2LProgressBar(progress = progress, color = statusColor, height = 10.dp)
             Spacer(Modifier.height(20.dp))
 
-            DetailRow("Status", statusLabel, statusColor)
-            DetailRow("Downloaded", "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}")
-            if (item.status == DownloadItem.Status.DOWNLOADING) {
-                DetailRow("Speed", if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else "Calculating…")
-                DetailRow("ETA", if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else "Calculating…")
+            Card(colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(16.dp)) {
+                Column(Modifier.padding(horizontal = 16.dp)) {
+                    DetailRow("Downloaded", "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}")
+                    if (item.status == DownloadItem.Status.DOWNLOADING) {
+                        DetailRow("Speed", if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else "Calculating…")
+                        DetailRow("ETA", if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else "Calculating…")
+                    }
+                    DetailRow("Connections", "${item.connections} threads")
+                    DetailRow("File name", item.fileName)
+                    DetailRow("Save folder", Uri.parse(item.folderUri).lastPathSegment ?: item.folderUri)
+                    DetailRow("Source URL", item.url, isLast = item.error == null)
+                    if (item.error != null) DetailRow("Error", item.error!!, RedErr, isLast = true)
+                }
             }
-            DetailRow("Connections", "${item.connections} threads")
-            DetailRow("File name", item.fileName)
-            DetailRow("Save folder", Uri.parse(item.folderUri).lastPathSegment ?: item.folderUri)
-            DetailRow("Source URL", item.url)
-            if (item.error != null) DetailRow("Error", item.error!!, RedErr)
 
             Spacer(Modifier.height(24.dp))
             when (item.status) {
@@ -732,13 +816,13 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
 }
 
 @Composable
-private fun DetailRow(label: String, value: String, valueColor: Color = TextPrimary) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+private fun DetailRow(label: String, value: String, valueColor: Color = TextPrimary, isLast: Boolean = false) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 12.dp)) {
         Text(label, color = TextSecondary, style = MaterialTheme.typography.labelSmall)
         Spacer(Modifier.height(2.dp))
         Text(value, color = valueColor, style = MaterialTheme.typography.bodyMedium)
     }
-    HorizontalDivider(color = Surface2)
+    if (!isLast) HorizontalDivider(color = Surface2)
 }
 
 private fun formatDuration(totalSeconds: Long): String {
