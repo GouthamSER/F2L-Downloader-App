@@ -38,36 +38,50 @@ class DownloadService : Service() {
                 val name = intent.getStringExtra("name") ?: "download.bin"
                 val tree = intent.getStringExtra("tree") ?: return START_NOT_STICKY
                 val connections = intent.getIntExtra("connections", 8)
+                val retryAttempts = intent.getIntExtra("retryAttempts", 3).coerceIn(0, 10)
+                val notificationsOn = intent.getBooleanExtra("notifications", true)
                 if (jobs.containsKey(id)) return START_NOT_STICKY
 
                 startForeground(1001, notification("Downloading $name"))
                 val job = scope.launch {
-                    try {
-                        engine.download(url, name, Uri.parse(tree), connections) { p ->
-                            sendBroadcast(Intent(ACTION_PROGRESS).apply {
-                                setPackage(packageName)
-                                putExtra("id", id)
-                                putExtra("downloaded", p.downloaded)
-                                putExtra("total", p.total)
-                                putExtra("speed", p.speed)
-                            })
-                            val percent = if (p.total > 0) p.downloaded * 100 / p.total else 0
-                            getSystemService(NotificationManager::class.java)
-                                .notify(1001, notification("$name • $percent%"))
+                    var attempt = 0
+                    while (true) {
+                        try {
+                            engine.download(url, name, Uri.parse(tree), connections) { p ->
+                                sendBroadcast(Intent(ACTION_PROGRESS).apply {
+                                    setPackage(packageName)
+                                    putExtra("id", id)
+                                    putExtra("downloaded", p.downloaded)
+                                    putExtra("total", p.total)
+                                    putExtra("speed", p.speed)
+                                })
+                                if (notificationsOn) {
+                                    val percent = if (p.total > 0) p.downloaded * 100 / p.total else 0
+                                    getSystemService(NotificationManager::class.java)
+                                        .notify(1001, notification("$name • $percent%"))
+                                }
+                            }
+                            sendBroadcast(Intent(ACTION_FINISHED).setPackage(packageName).putExtra("id", id))
+                            break
+                        } catch (e: CancellationException) {
+                            sendBroadcast(Intent(ACTION_PROGRESS).setPackage(packageName)
+                                .putExtra("id", id).putExtra("paused", true))
+                            break
+                        } catch (e: Exception) {
+                            if (attempt < retryAttempts) {
+                                attempt++
+                                delay(2000L * attempt)
+                                continue
+                            }
+                            sendBroadcast(Intent(ACTION_FAILED).setPackage(packageName)
+                                .putExtra("id", id).putExtra("error", e.message ?: "Download failed"))
+                            break
                         }
-                        sendBroadcast(Intent(ACTION_FINISHED).setPackage(packageName).putExtra("id", id))
-                    } catch (e: CancellationException) {
-                        sendBroadcast(Intent(ACTION_PROGRESS).setPackage(packageName)
-                            .putExtra("id", id).putExtra("paused", true))
-                    } catch (e: Exception) {
-                        sendBroadcast(Intent(ACTION_FAILED).setPackage(packageName)
-                            .putExtra("id", id).putExtra("error", e.message ?: "Download failed"))
-                    } finally {
-                        jobs.remove(id)
-                        if (jobs.isEmpty()) {
-                            stopForeground(STOP_FOREGROUND_REMOVE)
-                            stopSelf()
-                        }
+                    }
+                    jobs.remove(id)
+                    if (jobs.isEmpty()) {
+                        stopForeground(STOP_FOREGROUND_REMOVE)
+                        stopSelf()
                     }
                 }
                 jobs[id] = job
