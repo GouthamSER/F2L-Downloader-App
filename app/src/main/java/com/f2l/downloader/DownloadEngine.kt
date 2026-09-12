@@ -25,6 +25,32 @@ class DownloadEngine(private val context: Context) {
 
     data class Progress(val downloaded: Long, val total: Long, val speed: Long)
 
+    /** Detect the real file name from server headers (Content-Disposition), falling back to the URL path. */
+    suspend fun resolveFileName(url: String): String = withContext(Dispatchers.IO) {
+        val fallback = guessNameFromUrl(url)
+        try {
+            val head = client.newCall(Request.Builder().url(url).head().build()).execute()
+            val disposition = head.header("Content-Disposition")
+            val fromHeader = disposition?.let { parseContentDisposition(it) }
+            fromHeader ?: fallback
+        } catch (_: Exception) {
+            fallback
+        }
+    }
+
+    private fun parseContentDisposition(header: String): String? {
+        val star = Regex("filename\\*=(?:UTF-8'')?([^;]+)", RegexOption.IGNORE_CASE).find(header)
+        val plain = Regex("filename=\"?([^\";]+)\"?", RegexOption.IGNORE_CASE).find(header)
+        val raw = star?.groupValues?.get(1) ?: plain?.groupValues?.get(1)
+        return raw?.let { runCatching { java.net.URLDecoder.decode(it.trim(), "UTF-8") }.getOrDefault(it.trim()) }
+            ?.takeIf { it.isNotBlank() }
+    }
+
+    private fun guessNameFromUrl(url: String): String = try {
+        val last = java.net.URI(url).path.substringAfterLast('/', "")
+        java.net.URLDecoder.decode(last, "UTF-8").ifBlank { "download-${System.currentTimeMillis()}.bin" }
+    } catch (_: Exception) { "download-${System.currentTimeMillis()}.bin" }
+
     suspend fun download(
         url: String,
         fileName: String,
