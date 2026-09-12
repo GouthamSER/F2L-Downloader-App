@@ -11,7 +11,10 @@ data class DownloadItem(
     val speedBytesPerSec: Long = 0L,
     val etaSeconds: Long = -1L,
     val error: String? = null,
-    val connections: Int = 8
+    val connections: Int = 8,
+    val engine: Engine = Engine.HTTP,
+    val gid: String? = null
 ) {
     enum class Status { QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELED }
+    enum class Engine { HTTP, ARIA2 }
 }
