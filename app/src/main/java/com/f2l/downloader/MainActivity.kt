@@ -13,6 +13,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -33,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
@@ -196,18 +198,20 @@ private fun SplashScreen() {
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(
-                Modifier.size(96.dp).clip(RoundedCornerShape(24.dp)).background(Surface2),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.Default.Download, null, tint = AccentBlue, modifier = Modifier.size(48.dp))
-            }
-            Spacer(Modifier.height(16.dp))
+            Image(
+                painter = painterResource(R.drawable.f2l_logo),
+                contentDescription = "F2L Downloader",
+                modifier = Modifier.size(120.dp).clip(RoundedCornerShape(28.dp))
+            )
+            Spacer(Modifier.height(20.dp))
             Text("F2L Downloader", color = TextPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
             Text("Fast · Reliable · Simple", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(28.dp))
-            CircularProgressIndicator(color = AccentBlue, strokeWidth = 3.dp, modifier = Modifier.size(28.dp))
+            Spacer(Modifier.height(32.dp))
+            LinearProgressIndicator(
+                color = AccentBlue, trackColor = Surface2,
+                modifier = Modifier.width(160.dp).height(4.dp).clip(RoundedCornerShape(2.dp))
+            )
             Spacer(Modifier.height(10.dp))
             Text("Loading…", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
         }
@@ -439,8 +443,14 @@ private fun AddDownloadScreen(
     var autoStart by remember { mutableStateOf(true) }
     var connectionsExpanded by remember { mutableStateOf(false) }
 
+    val context = LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) folder = uri
+        if (uri != null) {
+            context.contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+            folder = uri
+        }
     }
 
     val urlValid = url.startsWith("http://") || url.startsWith("https://")
@@ -539,6 +549,9 @@ private fun SettingsScreen(vm: MainViewModel) {
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
+            context.contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
             settings.defaultFolderUri = uri.toString()
             defaultFolder = uri.toString()
         }

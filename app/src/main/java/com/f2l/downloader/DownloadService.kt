@@ -100,13 +100,19 @@ class DownloadService : Service() {
     /** Deletes the finished file plus any leftover .f2l.part segment files for this download. */
     private fun deleteDownloadFiles(treeUri: String, fileName: String) {
         try {
-            val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, Uri.parse(treeUri)) ?: return
+            val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, Uri.parse(treeUri))
+            if (tree == null || !tree.canWrite()) {
+                android.util.Log.e("F2L", "deleteDownloadFiles: no write access to $treeUri (permission not persisted?)")
+                return
+            }
             tree.findFile(fileName)?.delete()
             tree.listFiles().forEach { f ->
                 val n = f.name ?: return@forEach
                 if (n == "$fileName.f2l.part" || n.startsWith("$fileName.f2l.part")) f.delete()
             }
-        } catch (_: Exception) { /* best effort */ }
+        } catch (e: Exception) {
+            android.util.Log.e("F2L", "deleteDownloadFiles failed", e)
+        }
     }
 
     private fun notification(text: String): Notification =

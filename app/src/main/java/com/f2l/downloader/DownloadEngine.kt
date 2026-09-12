@@ -161,28 +161,33 @@ class DownloadEngine(private val context: Context) {
             }
         }
 
-        val jobs = (0 until count).map { index ->
-            launch(Dispatchers.IO) {
-                val start = index * chunk
-                val end = min(total - 1, start + chunk - 1)
-                val partName = "$fileName.f2l.part$index"
-                val part = tree.findFile(partName)
-                    ?: tree.createFile("application/octet-stream", partName)
-                    ?: error("Cannot create segment $index")
+        // Resolve/create all segment files sequentially first — SAF's createFile() isn't
+        // safe to call concurrently from multiple threads on the same folder; doing it here
+        // avoids the "Cannot create segment N" race that happens when all 8 threads hit it at once.
+        data class Segment(val index: Int, val start: Long, val end: Long, val part: DocumentFile, val existing: Long)
+        val segments = (0 until count).map { index ->
+            val start = index * chunk
+            val end = min(total - 1, start + chunk - 1)
+            val partName = "$fileName.f2l.part$index"
+            var part = tree.findFile(partName)
+                ?: tree.createFile("application/octet-stream", partName)
+                ?: error("Cannot create segment $index")
 
-                var existing = part.length().coerceAtLeast(0L)
-                val expected = end - start + 1
-                if (existing > expected) {
-                    part.delete()
-                    val fresh = tree.createFile("application/octet-stream", partName)
-                        ?: error("Cannot recreate segment")
-                    existing = 0L
-                    downloadedTotal.addAndGet(0L)
-                    downloadRange(url, fresh, start, end, existing, downloadedTotal)
-                } else {
-                    if (existing > 0) downloadedTotal.addAndGet(existing)
-                    if (existing < expected) downloadRange(url, part, start, end, existing, downloadedTotal)
-                }
+            var existing = part.length().coerceAtLeast(0L)
+            val expected = end - start + 1
+            if (existing > expected) {
+                part.delete()
+                part = tree.createFile("application/octet-stream", partName) ?: error("Cannot recreate segment $index")
+                existing = 0L
+            }
+            if (existing > 0) downloadedTotal.addAndGet(existing)
+            Segment(index, start, end, part, existing)
+        }
+
+        val jobs = segments.map { seg ->
+            launch(Dispatchers.IO) {
+                val expected = seg.end - seg.start + 1
+                if (seg.existing < expected) downloadRange(url, seg.part, seg.start, seg.end, seg.existing, downloadedTotal)
             }
         }
         jobs.joinAll()
