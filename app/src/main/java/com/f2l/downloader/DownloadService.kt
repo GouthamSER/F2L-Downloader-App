@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap
 class DownloadService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private lateinit var engine: DownloadEngine
+    private lateinit var repo: DownloadRepository
 
     companion object {
         private val jobs = ConcurrentHashMap<Long, Job>()
@@ -25,9 +26,23 @@ class DownloadService : Service() {
     override fun onCreate() {
         super.onCreate()
         engine = DownloadEngine(this)
+        repo = DownloadRepository(this)
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel("downloads", "Downloads", NotificationManager.IMPORTANCE_LOW)
         )
+    }
+
+    /**
+     * Writes straight to the same persisted store the app reads on launch. The UI is normally kept
+     * in sync live via broadcasts, but if Android kills the whole app process while it's backgrounded
+     * (common under memory pressure), broadcasts go nowhere — this makes sure the real outcome
+     * (completed/failed/paused/progress) is on disk regardless, so reopening the app shows the truth
+     * instead of a stale "still downloading" state.
+     */
+    private fun persist(id: Long, transform: (DownloadItem) -> DownloadItem) {
+        val current = repo.load()
+        val updated = current.map { if (it.id == id) transform(it) else it }
+        repo.save(updated)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -57,22 +72,30 @@ class DownloadService : Service() {
                                     putExtra("speed", p.speed)
                                 })
                                 val now = System.currentTimeMillis()
-                                if (notificationsOn && now - lastNotify > 800) {
+                                if (now - lastNotify > 800) {
                                     lastNotify = now
-                                    val percent = if (p.total > 0) (p.downloaded * 100 / p.total).toInt() else 0
-                                    val speedText = formatSpeed(p.speed)
-                                    val etaText = if (p.total > p.downloaded && p.speed > 0) formatEta((p.total - p.downloaded) / p.speed) else "--:--"
-                                    getSystemService(NotificationManager::class.java).notify(
-                                        1001,
-                                        notification(
-                                            name,
-                                            "$percent% • $speedText • ETA $etaText",
-                                            progressPercent = percent,
-                                            indeterminate = p.total <= 0
+                                    persist(id) { it.copy(
+                                        status = DownloadItem.Status.DOWNLOADING,
+                                        downloadedBytes = p.downloaded,
+                                        totalBytes = if (p.total > 0) p.total else it.totalBytes
+                                    ) }
+                                    if (notificationsOn) {
+                                        val percent = if (p.total > 0) (p.downloaded * 100 / p.total).toInt() else 0
+                                        val speedText = formatSpeed(p.speed)
+                                        val etaText = if (p.total > p.downloaded && p.speed > 0) formatEta((p.total - p.downloaded) / p.speed) else "--:--"
+                                        getSystemService(NotificationManager::class.java).notify(
+                                            1001,
+                                            notification(
+                                                name,
+                                                "$percent% • $speedText • ETA $etaText",
+                                                progressPercent = percent,
+                                                indeterminate = p.total <= 0
+                                            )
                                         )
-                                    )
+                                    }
                                 }
                             }
+                            persist(id) { it.copy(status = DownloadItem.Status.COMPLETED, downloadedBytes = it.totalBytes.coerceAtLeast(it.downloadedBytes)) }
                             if (notificationsOn) {
                                 getSystemService(NotificationManager::class.java)
                                     .notify(1001, notification(name, "Download complete", progressPercent = 100))
@@ -80,6 +103,7 @@ class DownloadService : Service() {
                             sendBroadcast(Intent(ACTION_FINISHED).setPackage(packageName).putExtra("id", id))
                             break
                         } catch (e: CancellationException) {
+                            persist(id) { it.copy(status = DownloadItem.Status.PAUSED) }
                             sendBroadcast(Intent(ACTION_PROGRESS).setPackage(packageName)
                                 .putExtra("id", id).putExtra("paused", true))
                             break
@@ -89,6 +113,7 @@ class DownloadService : Service() {
                                 delay(2000L * attempt)
                                 continue
                             }
+                            persist(id) { it.copy(status = DownloadItem.Status.FAILED, error = e.message ?: "Download failed") }
                             sendBroadcast(Intent(ACTION_FAILED).setPackage(packageName)
                                 .putExtra("id", id).putExtra("error", e.message ?: "Download failed"))
                             break

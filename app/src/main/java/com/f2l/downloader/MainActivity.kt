@@ -17,6 +17,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -36,6 +37,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -94,6 +97,48 @@ private fun colorScheme() = if (isLightMode) {
     )
 }
 
+// ---- Liquid Glass v2.5: blurred glow background + frosted translucent surfaces ----
+
+@Composable
+private fun GlassBackground(content: @Composable BoxScope.() -> Unit) {
+    Box(Modifier.fillMaxSize().background(BgDark)) {
+        val blobAlpha = if (isLightMode) 0.35f else 0.55f
+        Box(
+            Modifier.size(260.dp).offset((-70).dp, (-60).dp).align(Alignment.TopStart)
+                .graphicsLayer { alpha = blobAlpha; renderEffect = blurEffect(70f) }
+                .background(Brush.radialGradient(listOf(Color(0xFF3B6BFF), Color.Transparent)), CircleShape)
+        )
+        Box(
+            Modifier.size(230.dp).offset(70.dp, 260.dp).align(Alignment.TopEnd)
+                .graphicsLayer { alpha = blobAlpha; renderEffect = blurEffect(70f) }
+                .background(Brush.radialGradient(listOf(Color(0xFF7B5CFF), Color.Transparent)), CircleShape)
+        )
+        Box(
+            Modifier.size(200.dp).offset((-40).dp, 60.dp).align(Alignment.BottomStart)
+                .graphicsLayer { alpha = blobAlpha; renderEffect = blurEffect(70f) }
+                .background(Brush.radialGradient(listOf(Color(0xFF24C78E), Color.Transparent)), CircleShape)
+        )
+        content()
+    }
+}
+
+private fun blurEffect(radiusPx: Float): androidx.compose.ui.graphics.RenderEffect? =
+    if (android.os.Build.VERSION.SDK_INT >= 31) {
+        android.graphics.RenderEffect
+            .createBlurEffect(radiusPx, radiusPx, android.graphics.Shader.TileMode.DECAL)
+            .asComposeRenderEffect()
+    } else null
+
+/** Frosted-glass surface: translucent tint + soft border + rounded corners. Layer glass panels over GlassBackground. */
+private fun Modifier.glass(radius: androidx.compose.ui.unit.Dp = 20.dp): Modifier {
+    val tint = if (isLightMode) Color.White.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.08f)
+    val border = if (isLightMode) Color.White.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.18f)
+    return this
+        .clip(RoundedCornerShape(radius))
+        .background(tint)
+        .border(1.dp, border, RoundedCornerShape(radius))
+}
+
 class MainActivity : ComponentActivity() {
     private val vm by viewModels<MainViewModel>()
     private var incomingUrl = ""
@@ -130,6 +175,14 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 44)
         }
         if (intent?.action == Intent.ACTION_SEND) incomingUrl = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+        // Registered for the whole process lifetime (not just onStart/onStop) so progress/completion
+        // from the background DownloadService still lands while the app is backgrounded, not just visible.
+        val filter = IntentFilter().apply {
+            addAction(DownloadService.ACTION_PROGRESS)
+            addAction(DownloadService.ACTION_FINISHED)
+            addAction(DownloadService.ACTION_FAILED)
+        }
+        ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         setContent {
             MaterialTheme(colorScheme = colorScheme()) {
                 F2LApp(vm, incomingUrl)
@@ -137,19 +190,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        val filter = IntentFilter().apply {
-            addAction(DownloadService.ACTION_PROGRESS)
-            addAction(DownloadService.ACTION_FINISHED)
-            addAction(DownloadService.ACTION_FAILED)
-        }
-        ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
-    }
-
-    override fun onStop() {
+    override fun onDestroy() {
         unregisterReceiver(receiver)
-        super.onStop()
+        super.onDestroy()
     }
 }
 
@@ -210,34 +253,41 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
         )
     }
 
-    Scaffold(
-        containerColor = BgDark,
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(buildString {
-                        append("F2L ")
-                    })
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark, titleContentColor = TextPrimary),
-                navigationIcon = { Icon(Icons.Default.Download, null, Modifier.padding(start = 12.dp), tint = AccentBlue) }
-            )
-        },
-        floatingActionButton = {
-            if (tab == Tab.HOME || tab == Tab.DOWNLOADS) {
-                FloatingActionButton(onClick = { prefillUrl = ""; showAddScreen = true }, containerColor = AccentBlue) {
-                    Icon(Icons.Default.Add, "Add download", tint = Color.White)
+    GlassBackground {
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    title = {
+                        Text(buildString {
+                            append("F2L ")
+                        })
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = TextPrimary),
+                    navigationIcon = { Icon(Icons.Default.Download, null, Modifier.padding(start = 12.dp), tint = AccentBlue) },
+                    modifier = Modifier.padding(top = 6.dp, start = 12.dp, end = 12.dp).glass(radius = 18.dp)
+                )
+            },
+            floatingActionButton = {
+                if (tab == Tab.HOME || tab == Tab.DOWNLOADS) {
+                    FloatingActionButton(
+                        onClick = { prefillUrl = ""; showAddScreen = true },
+                        containerColor = Color.Transparent,
+                        modifier = Modifier.glass(radius = 20.dp)
+                    ) {
+                        Icon(Icons.Default.Add, "Add download", tint = AccentBlue)
+                    }
                 }
-            }
-        },
-        bottomBar = { BottomBar(tab) { tab = it } }
-    ) { pad ->
-        Box(Modifier.padding(pad).fillMaxSize()) {
-            when (tab) {
-                Tab.HOME -> DownloadListScreen(items, showFilters = true, filterDefault = StatusFilter.ALL, vm = vm)
-                Tab.DOWNLOADS -> DownloadListScreen(items, showFilters = false, filterDefault = StatusFilter.ACTIVE, vm = vm)
-                Tab.FILES -> FilesScreen(items)
-                Tab.SETTINGS -> SettingsScreen(vm)
+            },
+            bottomBar = { BottomBar(tab) { tab = it } }
+        ) { pad ->
+            Box(Modifier.padding(pad).fillMaxSize()) {
+                when (tab) {
+                    Tab.HOME -> DownloadListScreen(items, showFilters = true, filterDefault = StatusFilter.ALL, vm = vm)
+                    Tab.DOWNLOADS -> DownloadListScreen(items, showFilters = false, filterDefault = StatusFilter.ACTIVE, vm = vm)
+                    Tab.FILES -> FilesScreen(items)
+                    Tab.SETTINGS -> SettingsScreen(vm)
+                }
             }
         }
     }
@@ -272,7 +322,10 @@ private fun SplashScreen() {
 
 @Composable
 private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
-    NavigationBar(containerColor = Surface1) {
+    NavigationBar(
+        containerColor = Color.Transparent,
+        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp).glass(radius = 24.dp)
+    ) {
         val entries = listOf(
             Triple(Tab.HOME, Icons.Default.Home, stringResource(R.string.nav_home)),
             Triple(Tab.DOWNLOADS, Icons.Default.Download, stringResource(R.string.nav_downloads)),
@@ -288,7 +341,7 @@ private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
                 colors = NavigationBarItemDefaults.colors(
                     selectedIconColor = AccentBlue, selectedTextColor = AccentBlue,
                     unselectedIconColor = TextSecondary, unselectedTextColor = TextSecondary,
-                    indicatorColor = Surface2
+                    indicatorColor = Color.White.copy(alpha = if (isLightMode) 0.4f else 0.12f)
                 )
             )
         }
@@ -443,9 +496,9 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
     }
 
     Card(
-        Modifier.fillMaxWidth().clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(containerColor = Surface1),
-        shape = RoundedCornerShape(14.dp)
+        Modifier.fillMaxWidth().glass(radius = 18.dp).clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        shape = RoundedCornerShape(18.dp)
     ) {
         Column(Modifier.padding(14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -533,8 +586,8 @@ private fun FilesScreen(items: List<DownloadItem>) {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(completed, key = { it.id }) { item ->
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.clickable { openDownloadedFile(context, item) }
+                        colors = CardDefaults.cardColors(containerColor = Color.Transparent), shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.fillMaxWidth().glass(radius = 16.dp).clickable { openDownloadedFile(context, item) }
                     ) {
                         Row(Modifier.padding(14.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Icon(fileTypeIcon(item.fileName), null, tint = GreenOk)
@@ -578,12 +631,13 @@ private fun AddDownloadScreen(
 
     val urlValid = url.startsWith("http://") || url.startsWith("https://")
 
+    GlassBackground {
     Scaffold(
-        containerColor = BgDark,
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.add_download_title)) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark, titleContentColor = TextPrimary),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = TextPrimary),
                 navigationIcon = {
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) }
                 }
@@ -652,6 +706,7 @@ private fun AddDownloadScreen(
                 Text(if (autoStart) stringResource(R.string.action_start_download) else stringResource(R.string.action_add_to_queue))
             }
         }
+    }
     }
 }
 
@@ -741,7 +796,7 @@ private fun SettingsScreen(vm: MainViewModel) {
         }
 
         Spacer(Modifier.height(24.dp))
-        Card(colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(14.dp)) {
+        Card(modifier = Modifier.fillMaxWidth().glass(radius = 18.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent), shape = RoundedCornerShape(14.dp)) {
             Column(Modifier.padding(16.dp)) {
                 Text("F2L Downloader", color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text(stringResource(R.string.dev_version), color = TextSecondary, style = MaterialTheme.typography.bodySmall)
@@ -766,7 +821,7 @@ private fun SettingsScreen(vm: MainViewModel) {
 private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
     Text(title, color = TextSecondary, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
     Spacer(Modifier.height(8.dp))
-    Card(colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(14.dp)) {
+    Card(modifier = Modifier.fillMaxWidth().glass(radius = 18.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.padding(vertical = 4.dp), content = content)
     }
 }
@@ -815,12 +870,13 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
         DownloadItem.Status.CANCELED -> TextSecondary to stringResource(R.string.status_canceled)
     }
 
+    GlassBackground {
     Scaffold(
-        containerColor = BgDark,
+        containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
                 title = { Text(item.fileName, maxLines = 1) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark, titleContentColor = TextPrimary),
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = TextPrimary),
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) } },
                 actions = { IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = RedErr) } }
             )
@@ -828,13 +884,14 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
     ) { pad ->
         Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
             Box(
-                Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(20.dp))
-                    .background(Brush.verticalGradient(listOf(statusColor.copy(alpha = 0.22f), Surface1))),
+                Modifier.fillMaxWidth().height(150.dp).glass(radius = 20.dp)
+                    .background(Brush.verticalGradient(listOf(statusColor.copy(alpha = 0.28f), Color.Transparent))),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Box(
-                        Modifier.size(52.dp).clip(RoundedCornerShape(16.dp)).background(statusColor.copy(alpha = 0.2f)),
+                        Modifier.size(52.dp).glass(radius = 16.dp)
+                            .background(statusColor.copy(alpha = 0.22f)),
                         contentAlignment = Alignment.Center
                     ) { Icon(fileTypeIcon(item.fileName), null, tint = statusColor, modifier = Modifier.size(26.dp)) }
                     Spacer(Modifier.height(10.dp))
@@ -846,7 +903,7 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
             F2LProgressBar(progress = progress, color = statusColor, height = 10.dp)
             Spacer(Modifier.height(20.dp))
 
-            Card(colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(16.dp)) {
+            Card(modifier = Modifier.fillMaxWidth().glass(radius = 20.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent), shape = RoundedCornerShape(16.dp)) {
                 Column(Modifier.padding(horizontal = 16.dp)) {
                     DetailRow(stringResource(R.string.detail_downloaded), "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}")
                     if (item.status == DownloadItem.Status.DOWNLOADING) {
@@ -879,6 +936,7 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
                 else -> {}
             }
         }
+    }
     }
 }
 
