@@ -170,10 +170,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         applyPalette(SettingsRepository(application).themeMode)
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-            != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 44)
-        }
         if (intent?.action == Intent.ACTION_SEND) incomingUrl = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
         // Registered for the whole process lifetime (not just onStart/onStop) so progress/completion
         // from the background DownloadService still lands while the app is backgrounded, not just visible.
@@ -213,6 +209,17 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
     var tab by remember { mutableStateOf(Tab.HOME) }
     var showAddScreen by remember { mutableStateOf(sharedUrl.isNotBlank()) }
     var prefillUrl by remember { mutableStateOf(sharedUrl) }
+
+    var showOnboarding by remember { mutableStateOf(vm.settings.defaultFolderUri == null) }
+    if (showOnboarding) {
+        OnboardingScreen(
+            onDone = { folderUri ->
+                folderUri?.let { vm.settings.defaultFolderUri = it.toString() }
+                showOnboarding = false
+            }
+        )
+        return
+    }
 
     if (showAddScreen) {
         BackHandler { showAddScreen = false }
@@ -294,6 +301,75 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
 }
 
 @Composable
+private fun OnboardingScreen(onDone: (Uri?) -> Unit) {
+    val context = LocalContext.current
+    var step by remember { mutableStateOf(0) } // 0 = notifications, 1 = storage
+
+    val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { step = 1 }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            context.contentResolver.takePersistableUriPermission(
+                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        }
+        onDone(uri)
+    }
+
+    GlassBackground {
+        Box(Modifier.fillMaxSize().padding(28.dp), contentAlignment = Alignment.Center) {
+            Column(
+                Modifier.fillMaxWidth().glass(radius = 24.dp).padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.f2l_logo),
+                    contentDescription = null,
+                    modifier = Modifier.size(72.dp).clip(RoundedCornerShape(18.dp))
+                )
+                Spacer(Modifier.height(20.dp))
+                if (step == 0) {
+                    Icon(Icons.Default.Notifications, null, tint = AccentBlue, modifier = Modifier.size(36.dp))
+                    Spacer(Modifier.height(12.dp))
+                    Text("Stay updated on your downloads", color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "F2L Downloader shows progress, speed, and completion in a notification while it downloads in the background.",
+                        color = TextSecondary, style = MaterialTheme.typography.bodySmall, textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Button(
+                        onClick = {
+                            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                                notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            } else step = 1
+                        },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                    ) { Text("Allow notifications") }
+                    TextButton(onClick = { step = 1 }) { Text("Skip", color = TextSecondary) }
+                } else {
+                    Icon(Icons.Default.Folder, null, tint = AccentBlue, modifier = Modifier.size(36.dp))
+                    Spacer(Modifier.height(12.dp))
+                    Text("Choose where to save files", color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Pick a default download folder. You grant F2L access to just this folder — nothing else on your device.",
+                        color = TextSecondary, style = MaterialTheme.typography.bodySmall, textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    Spacer(Modifier.height(24.dp))
+                    Button(
+                        onClick = { folderPicker.launch(null) },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                    ) { Text("Choose folder") }
+                    TextButton(onClick = { onDone(null) }) { Text("Skip for now", color = TextSecondary) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SplashScreen() {
     Box(
         Modifier.fillMaxSize().background(BgDark),
@@ -348,6 +424,28 @@ private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
     }
 }
 
+private fun shareDownloadedFile(context: android.content.Context, item: DownloadItem) {
+    try {
+        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(item.folderUri))
+        val file = tree?.findFile(item.fileName)
+        if (file == null || !file.exists()) {
+            android.widget.Toast.makeText(context, "File not found — it may have been moved or deleted", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ext = item.fileName.substringAfterLast('.', "").lowercase()
+        val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+            ?: context.contentResolver.getType(file.uri) ?: "*/*"
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = mime
+            putExtra(Intent.EXTRA_STREAM, file.uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Share ${item.fileName}"))
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "Couldn't share this file", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
 private fun openDownloadedFile(context: android.content.Context, item: DownloadItem) {
     try {
         val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(item.folderUri))
@@ -356,9 +454,13 @@ private fun openDownloadedFile(context: android.content.Context, item: DownloadI
             android.widget.Toast.makeText(context, "File not found — it may have been moved or deleted", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
-        val mime = context.contentResolver.getType(file.uri)
-            ?: android.webkit.MimeTypeMap.getSingleton()
-                .getMimeTypeFromExtension(item.fileName.substringAfterLast('.', "").lowercase())
+        // Extension-based lookup first: every file is created with a generic
+        // "application/octet-stream" mime at download time, so contentResolver.getType()
+        // always returns that non-null generic value and the extension fallback below it
+        // would never run if checked second — that was the actual bug stopping files opening.
+        val ext = item.fileName.substringAfterLast('.', "").lowercase()
+        val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+            ?: context.contentResolver.getType(file.uri)
             ?: "*/*"
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(file.uri, mime)
@@ -415,7 +517,8 @@ private fun DownloadListScreen(
         DownloadDetailScreen(
             live, onBack = { selected = null }, onPause = { vm.pause(live) }, onResume = { vm.start(live) },
             onDelete = { pendingDelete = live },
-            onOpen = { openDownloadedFile(context, live) }
+            onOpen = { openDownloadedFile(context, live) },
+            onShare = { shareDownloadedFile(context, live) }
         )
         return
     }
@@ -858,7 +961,7 @@ private fun SettingsToggleRow(icon: androidx.compose.ui.graphics.vector.ImageVec
 }
 
 @Composable
-private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onOpen: () -> Unit) {
+private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onOpen: () -> Unit, onShare: () -> Unit) {
     BackHandler(onBack = onBack)
     val progress = if (item.totalBytes > 0) (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
     val (statusColor, statusLabel) = when (item.status) {
@@ -928,10 +1031,15 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
                 ) {
                     Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(if (item.status == DownloadItem.Status.FAILED) stringResource(R.string.action_retry) else stringResource(R.string.action_resume))
                 }
-                DownloadItem.Status.COMPLETED -> Button(
-                    onClick = onOpen, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
-                ) {
-                    Icon(Icons.Default.OpenInNew, null); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_open_file))
+                DownloadItem.Status.COMPLETED -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = onOpen, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                    ) {
+                        Icon(Icons.Default.OpenInNew, null); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_open_file))
+                    }
+                    OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Default.Share, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text("Share", color = TextPrimary)
+                    }
                 }
                 else -> {}
             }

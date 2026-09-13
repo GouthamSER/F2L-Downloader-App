@@ -20,6 +20,12 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.min
 
 class DownloadEngine(private val context: Context) {
+    private fun guessMime(fileName: String): String =
+        android.webkit.MimeTypeMap.getSingleton()
+            .getMimeTypeFromExtension(fileName.substringAfterLast('.', "").lowercase())
+            ?: "application/octet-stream"
+
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -84,7 +90,7 @@ class DownloadEngine(private val context: Context) {
         onProgress: (Progress) -> Unit
     ) {
         val partName = "$fileName.f2l.part"
-        val part = tree.findFile(partName) ?: tree.createFile("application/octet-stream", partName)
+        val part = tree.findFile(partName) ?: tree.createFile(guessMime(fileName), partName)
         ?: error("Cannot create temporary file")
 
         val existing = part.length().coerceAtLeast(0L)
@@ -196,7 +202,7 @@ class DownloadEngine(private val context: Context) {
 
         val final = tree.findFile(fileName)
         final?.delete()
-        val output = tree.createFile("application/octet-stream", fileName)
+        val output = tree.createFile(guessMime(fileName), fileName)
             ?: error("Cannot create final file")
         val out = context.contentResolver.openOutputStream(output.uri, "wt")
             ?: error("Cannot open final file")
