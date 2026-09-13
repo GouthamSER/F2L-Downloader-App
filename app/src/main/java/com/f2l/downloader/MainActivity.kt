@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -171,6 +172,7 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
     var prefillUrl by remember { mutableStateOf(sharedUrl) }
 
     if (showAddScreen) {
+        BackHandler { showAddScreen = false }
         AddDownloadScreen(
             initialUrl = prefillUrl,
             defaultConnections = vm.settings.defaultConnections,
@@ -183,6 +185,29 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
             }
         )
         return
+    }
+
+    var showExitDialog by remember { mutableStateOf(false) }
+    val activeCount = items.count { it.status == DownloadItem.Status.DOWNLOADING || it.status == DownloadItem.Status.QUEUED }
+
+    BackHandler {
+        if (tab != Tab.HOME) tab = Tab.HOME else showExitDialog = true
+    }
+
+    if (showExitDialog) {
+        val activity = (LocalContext.current as? android.app.Activity)
+        AlertDialog(
+            onDismissRequest = { showExitDialog = false },
+            title = { Text("Exit F2L Downloader?") },
+            text = {
+                Text(
+                    if (activeCount > 0) "$activeCount download${if (activeCount > 1) "s" else ""} will keep running in the background."
+                    else "Are you sure you want to exit?"
+                )
+            },
+            confirmButton = { TextButton(onClick = { activity?.finish() }) { Text("Yes", color = RedErr) } },
+            dismissButton = { TextButton(onClick = { showExitDialog = false }) { Text("No") } }
+        )
     }
 
     Scaffold(
@@ -779,6 +804,7 @@ private fun SettingsToggleRow(icon: androidx.compose.ui.graphics.vector.ImageVec
 
 @Composable
 private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onOpen: () -> Unit) {
+    BackHandler(onBack = onBack)
     val progress = if (item.totalBytes > 0) (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
     val (statusColor, statusLabel) = when (item.status) {
         DownloadItem.Status.DOWNLOADING -> AccentBlue to stringResource(R.string.status_downloading)
