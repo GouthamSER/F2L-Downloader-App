@@ -12,8 +12,8 @@ android {
         applicationId = "com.f2l.downloader"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "2.5"
+        versionCode = 4
+        versionName = "3.0"
     }
 
     buildFeatures {
