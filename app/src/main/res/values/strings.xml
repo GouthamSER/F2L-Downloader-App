@@ -1,3 +1,82 @@
 <resources>
     <string name="app_name">F2L Downloader</string>
+    <string name="tagline">Fast · Reliable · Simple</string>
+    <string name="loading">Loading…</string>
+
+    <string name="nav_home">Home</string>
+    <string name="nav_downloads">Downloads</string>
+    <string name="nav_files">Files</string>
+    <string name="nav_settings">Settings</string>
+
+    <string name="filter_all">All</string>
+    <string name="filter_active">Active</string>
+    <string name="filter_completed">Completed</string>
+    <string name="filter_failed">Failed</string>
+    <string name="no_downloads_yet">No downloads here yet</string>
+
+    <string name="status_downloading">Downloading</string>
+    <string name="status_paused">Paused</string>
+    <string name="status_completed">Completed</string>
+    <string name="status_failed">Failed</string>
+    <string name="status_queued">Queued</string>
+    <string name="status_canceled">Canceled</string>
+
+    <string name="action_pause">Pause</string>
+    <string name="action_resume">Resume</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_open_file">Open file</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_close">Close</string>
+    <string name="action_back">Back</string>
+
+    <string name="add_download_title">Add download</string>
+    <string name="label_url">URL</string>
+    <string name="hint_url">https://example.com/file.zip</string>
+    <string name="label_filename">File name (optional)</string>
+    <string name="hint_filename">Detected automatically if left blank</string>
+    <string name="label_save_to">Save to</string>
+    <string name="action_choose_folder">Choose folder</string>
+    <string name="folder_selected">Folder selected</string>
+    <string name="label_connections">Connections</string>
+    <string name="connections_hint">More connections = faster download (works best for large files)</string>
+    <string name="label_start_immediately">Start download immediately</string>
+    <string name="action_start_download">Start download</string>
+    <string name="action_add_to_queue">Add to queue</string>
+
+    <string name="settings_title">Settings</string>
+    <string name="section_download_settings">Download settings</string>
+    <string name="row_parallel_connections">Parallel connections</string>
+    <string name="row_download_folder">Download folder</string>
+    <string name="row_wifi_only">Wi-Fi only</string>
+    <string name="row_wifi_only_desc">Download only on Wi-Fi</string>
+    <string name="section_general">General</string>
+    <string name="row_appearance">Appearance</string>
+    <string name="theme_dark">Dark theme</string>
+    <string name="theme_light">Light theme</string>
+    <string name="row_language">Language</string>
+    <string name="row_notifications">Notifications</string>
+    <string name="row_notifications_desc">Enable download notifications</string>
+    <string name="language_note">App text is currently English-only; language switch affects the system locale for now.</string>
+    <string name="section_advanced">Advanced</string>
+    <string name="row_auto_resume">Auto resume</string>
+    <string name="row_auto_resume_desc">Resume after app restart</string>
+    <string name="row_retry_on_failure">Retry on failure</string>
+    <string name="attempts_fmt">%1$d attempts</string>
+
+    <string name="files_title">Downloaded files</string>
+    <string name="files_subtitle">Browse files saved to your chosen folders</string>
+    <string name="files_empty">Nothing completed yet</string>
+
+    <string name="detail_downloaded">Downloaded</string>
+    <string name="detail_speed">Speed</string>
+    <string name="detail_eta">ETA</string>
+    <string name="detail_connections">Connections</string>
+    <string name="detail_filename">File name</string>
+    <string name="detail_save_folder">Save folder</string>
+    <string name="detail_source_url">Source URL</string>
+    <string name="detail_error">Error</string>
+    <string name="calculating">Calculating…</string>
+
+    <string name="dev_version">Version 2.0</string>
+    <string name="dev_developed_by">Developed by</string>
 </resources>
