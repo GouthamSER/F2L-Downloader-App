@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
@@ -232,14 +233,14 @@ private fun SplashScreen() {
             Spacer(Modifier.height(20.dp))
             Text("F2L Downloader", color = TextPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
-            Text("Fast · Reliable · Simple", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+            Text(stringResource(R.string.tagline), color = TextSecondary, style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(32.dp))
             LinearProgressIndicator(
                 color = AccentBlue, trackColor = Surface2,
                 modifier = Modifier.width(160.dp).height(4.dp).clip(RoundedCornerShape(2.dp))
             )
             Spacer(Modifier.height(10.dp))
-            Text("Loading…", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+            Text(stringResource(R.string.loading), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
         }
     }
 }
@@ -248,10 +249,10 @@ private fun SplashScreen() {
 private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
     NavigationBar(containerColor = Surface1) {
         val entries = listOf(
-            Triple(Tab.HOME, Icons.Default.Home, "Home"),
-            Triple(Tab.DOWNLOADS, Icons.Default.Download, "Downloads"),
-            Triple(Tab.FILES, Icons.Default.Folder, "Files"),
-            Triple(Tab.SETTINGS, Icons.Default.Settings, "Settings")
+            Triple(Tab.HOME, Icons.Default.Home, stringResource(R.string.nav_home)),
+            Triple(Tab.DOWNLOADS, Icons.Default.Download, stringResource(R.string.nav_downloads)),
+            Triple(Tab.FILES, Icons.Default.Folder, stringResource(R.string.nav_files)),
+            Triple(Tab.SETTINGS, Icons.Default.Settings, stringResource(R.string.nav_settings))
         )
         entries.forEach { (t, icon, label) ->
             NavigationBarItem(
@@ -269,6 +270,29 @@ private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
     }
 }
 
+private fun openDownloadedFile(context: android.content.Context, item: DownloadItem) {
+    try {
+        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(item.folderUri))
+        val file = tree?.findFile(item.fileName)
+        if (file == null || !file.exists()) {
+            android.widget.Toast.makeText(context, "File not found — it may have been moved or deleted", android.widget.Toast.LENGTH_SHORT).show()
+            return
+        }
+        val mime = context.contentResolver.getType(file.uri)
+            ?: android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(item.fileName.substringAfterLast('.', "").lowercase())
+            ?: "*/*"
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(file.uri, mime)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "No app found to open this file", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
 @Composable
 private fun DownloadListScreen(
     items: List<DownloadItem>,
@@ -276,6 +300,7 @@ private fun DownloadListScreen(
     filterDefault: StatusFilter,
     vm: MainViewModel
 ) {
+    val context = LocalContext.current
     var filter by remember { mutableStateOf(filterDefault) }
     val filtered = items.filter {
         when (filter) {
@@ -289,7 +314,11 @@ private fun DownloadListScreen(
     var selected by remember { mutableStateOf<DownloadItem?>(null) }
     selected?.let { sel ->
         val live = items.find { it.id == sel.id } ?: sel
-        DownloadDetailScreen(live, onBack = { selected = null }, onPause = { vm.pause(live) }, onResume = { vm.start(live) }, onDelete = { vm.delete(live); selected = null })
+        DownloadDetailScreen(
+            live, onBack = { selected = null }, onPause = { vm.pause(live) }, onResume = { vm.start(live) },
+            onDelete = { vm.delete(live); selected = null },
+            onOpen = { openDownloadedFile(context, live) }
+        )
         return
     }
 
@@ -297,7 +326,12 @@ private fun DownloadListScreen(
         if (showFilters) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 StatusFilter.entries.forEach { f ->
-                    val label = f.name.lowercase().replaceFirstChar { it.uppercase() }
+                    val label = when (f) {
+                        StatusFilter.ALL -> stringResource(R.string.filter_all)
+                        StatusFilter.ACTIVE -> stringResource(R.string.filter_active)
+                        StatusFilter.COMPLETED -> stringResource(R.string.filter_completed)
+                        StatusFilter.FAILED -> stringResource(R.string.filter_failed)
+                    }
                     FilterChip(
                         selected = filter == f,
                         onClick = { filter = f },
@@ -314,7 +348,7 @@ private fun DownloadListScreen(
 
         if (filtered.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No downloads here yet", color = TextSecondary)
+                Text(stringResource(R.string.no_downloads_yet), color = TextSecondary)
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -324,7 +358,10 @@ private fun DownloadListScreen(
                         onPause = { vm.pause(item) },
                         onResume = { vm.start(item) },
                         onDelete = { vm.delete(item) },
-                        onClick = { selected = item }
+                        onClick = {
+                            if (item.status == DownloadItem.Status.COMPLETED) openDownloadedFile(context, item)
+                            else selected = item
+                        }
                     )
                 }
             }
@@ -352,12 +389,12 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
         (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
 
     val (statusColor, statusLabel) = when (item.status) {
-        DownloadItem.Status.DOWNLOADING -> AccentBlue to "Downloading"
-        DownloadItem.Status.PAUSED -> AmberWarn to "Paused"
-        DownloadItem.Status.COMPLETED -> GreenOk to "Completed"
-        DownloadItem.Status.FAILED -> RedErr to "Failed"
-        DownloadItem.Status.QUEUED -> TextSecondary to "Queued"
-        DownloadItem.Status.CANCELED -> TextSecondary to "Canceled"
+        DownloadItem.Status.DOWNLOADING -> AccentBlue to stringResource(R.string.status_downloading)
+        DownloadItem.Status.PAUSED -> AmberWarn to stringResource(R.string.status_paused)
+        DownloadItem.Status.COMPLETED -> GreenOk to stringResource(R.string.status_completed)
+        DownloadItem.Status.FAILED -> RedErr to stringResource(R.string.status_failed)
+        DownloadItem.Status.QUEUED -> TextSecondary to stringResource(R.string.status_queued)
+        DownloadItem.Status.CANCELED -> TextSecondary to stringResource(R.string.status_canceled)
     }
 
     Card(
@@ -378,7 +415,7 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
                     Text(item.fileName, color = TextPrimary, style = MaterialTheme.typography.titleSmall, maxLines = 1)
                     Text("${formatBytes(item.totalBytes)} · ${item.connections} threads", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                 }
-                IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Delete", tint = TextSecondary) }
+                IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = TextSecondary) }
             }
             Spacer(Modifier.height(10.dp))
             F2LProgressBar(progress = progress, color = statusColor, height = 8.dp)
@@ -408,13 +445,13 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
                 DownloadItem.Status.DOWNLOADING -> {
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text("Pause", color = TextPrimary)
+                        Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
                     }
                 }
                 DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> {
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = onResume, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)) {
-                        Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(if (item.status == DownloadItem.Status.FAILED) "Retry" else "Resume")
+                        Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(if (item.status == DownloadItem.Status.FAILED) stringResource(R.string.action_retry) else stringResource(R.string.action_resume))
                     }
                 }
                 else -> {}
@@ -436,20 +473,24 @@ private fun fileTypeIcon(name: String) = when (name.substringAfterLast('.', "").
 
 @Composable
 private fun FilesScreen(items: List<DownloadItem>) {
+    val context = LocalContext.current
     val completed = items.filter { it.status == DownloadItem.Status.COMPLETED }
     Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Downloaded files", color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.files_title), color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(4.dp))
-        Text("Browse files saved to your chosen folders", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+        Text(stringResource(R.string.files_subtitle), color = TextSecondary, style = MaterialTheme.typography.bodySmall)
         Spacer(Modifier.height(16.dp))
         if (completed.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("Nothing completed yet", color = TextSecondary)
+                Text(stringResource(R.string.files_empty), color = TextSecondary)
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(completed, key = { it.id }) { item ->
-                    Card(colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(12.dp)) {
+                    Card(
+                        colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.clickable { openDownloadedFile(context, item) }
+                    ) {
                         Row(Modifier.padding(14.dp).fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Icon(fileTypeIcon(item.fileName), null, tint = GreenOk)
                             Spacer(Modifier.width(10.dp))
@@ -496,43 +537,43 @@ private fun AddDownloadScreen(
         containerColor = BgDark,
         topBar = {
             TopAppBar(
-                title = { Text("Add download") },
+                title = { Text(stringResource(R.string.add_download_title)) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark, titleContentColor = TextPrimary),
                 navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) }
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) }
                 }
             )
         }
     ) { pad ->
         Column(Modifier.padding(pad).padding(16.dp).fillMaxSize()) {
-            Text("URL", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+            Text(stringResource(R.string.label_url), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
             OutlinedTextField(
                 value = url, onValueChange = { url = it },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
-                placeholder = { Text("https://example.com/file.zip") }
+                placeholder = { Text(stringResource(R.string.hint_url)) }
             )
             Spacer(Modifier.height(16.dp))
 
-            Text("File name (optional)", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+            Text(stringResource(R.string.label_filename), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
             OutlinedTextField(
                 value = fileName, onValueChange = { fileName = it },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
-                placeholder = { Text("Detected automatically if left blank") }
+                placeholder = { Text(stringResource(R.string.hint_filename)) }
             )
             Spacer(Modifier.height(16.dp))
 
-            Text("Save to", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+            Text(stringResource(R.string.label_save_to), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
             OutlinedButton(onClick = { picker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Default.Folder, null, tint = TextPrimary)
                 Spacer(Modifier.width(8.dp))
-                Text(if (folder == null) "Choose folder" else "Folder selected", color = TextPrimary)
+                Text(if (folder == null) stringResource(R.string.action_choose_folder) else stringResource(R.string.folder_selected), color = TextPrimary)
             }
             Spacer(Modifier.height(16.dp))
 
-            Text("Connections", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+            Text(stringResource(R.string.label_connections), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
             Box {
                 OutlinedButton(onClick = { connectionsExpanded = true }, modifier = Modifier.fillMaxWidth()) {
@@ -545,11 +586,11 @@ private fun AddDownloadScreen(
                     }
                 }
             }
-            Text("More connections = faster download (works best for large files)", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+            Text(stringResource(R.string.connections_hint), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
             Spacer(Modifier.height(16.dp))
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("Start download immediately", color = TextPrimary)
+                Text(stringResource(R.string.label_start_immediately), color = TextPrimary)
                 Switch(
                     checked = autoStart, onCheckedChange = { autoStart = it },
                     colors = SwitchDefaults.colors(checkedTrackColor = AccentBlue)
@@ -563,7 +604,7 @@ private fun AddDownloadScreen(
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
             ) {
-                Text(if (autoStart) "Start download" else "Add to queue")
+                Text(if (autoStart) stringResource(R.string.action_start_download) else stringResource(R.string.action_add_to_queue))
             }
         }
     }
@@ -603,13 +644,13 @@ private fun SettingsScreen(vm: MainViewModel) {
     val folderLabel = defaultFolder?.let { Uri.parse(it).lastPathSegment ?: it } ?: "/storage/emulated/0/Download"
 
     Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState())) {
-        Text("Settings", color = TextPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(stringResource(R.string.settings_title), color = TextPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(16.dp))
 
-        SettingsSection(title = "Download settings") {
+        SettingsSection(title = stringResource(R.string.section_download_settings)) {
             Box {
                 SettingsRow(
-                    icon = Icons.Default.Speed, title = "Parallel connections",
+                    icon = Icons.Default.Speed, title = stringResource(R.string.row_parallel_connections),
                     subtitle = "$defaultConnections" + if (defaultConnections == 8) " (recommended)" else "",
                     onClick = { connectionsMenu = true }
                 )
@@ -621,20 +662,20 @@ private fun SettingsScreen(vm: MainViewModel) {
                     }
                 }
             }
-            SettingsRow(icon = Icons.Default.Folder, title = "Download folder", subtitle = folderLabel, onClick = { folderPicker.launch(null) })
-            SettingsToggleRow(icon = Icons.Default.Wifi, title = "Wi-Fi only", subtitle = "Download only on Wi-Fi", checked = wifiOnly, onCheckedChange = { wifiOnly = it; settings.wifiOnly = it })
+            SettingsRow(icon = Icons.Default.Folder, title = stringResource(R.string.row_download_folder), subtitle = folderLabel, onClick = { folderPicker.launch(null) })
+            SettingsToggleRow(icon = Icons.Default.Wifi, title = stringResource(R.string.row_wifi_only), subtitle = stringResource(R.string.row_wifi_only_desc), checked = wifiOnly, onCheckedChange = { wifiOnly = it; settings.wifiOnly = it })
         }
 
         Spacer(Modifier.height(20.dp))
-        SettingsSection(title = "General") {
+        SettingsSection(title = stringResource(R.string.section_general)) {
             Box {
-                SettingsRow(icon = Icons.Default.Palette, title = "Appearance", subtitle = if (themeMode == "light") "Light theme" else "Dark theme", onClick = { appearanceMenu = true })
+                SettingsRow(icon = Icons.Default.Palette, title = stringResource(R.string.row_appearance), subtitle = if (themeMode == "light") stringResource(R.string.theme_light) else stringResource(R.string.theme_dark), onClick = { appearanceMenu = true })
                 DropdownMenu(expanded = appearanceMenu, onDismissRequest = { appearanceMenu = false }) {
-                    DropdownMenuItem(text = { Text("Dark theme") }, onClick = {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.theme_dark)) }, onClick = {
                         appearanceMenu = false
                         if (themeMode != "dark") { themeMode = "dark"; settings.themeMode = "dark"; (context as? android.app.Activity)?.recreate() }
                     })
-                    DropdownMenuItem(text = { Text("Light theme") }, onClick = {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.theme_light)) }, onClick = {
                         appearanceMenu = false
                         if (themeMode != "light") { themeMode = "light"; settings.themeMode = "light"; (context as? android.app.Activity)?.recreate() }
                     })
@@ -642,7 +683,7 @@ private fun SettingsScreen(vm: MainViewModel) {
             }
             Box {
                 SettingsRow(
-                    icon = Icons.Default.Language, title = "Language",
+                    icon = Icons.Default.Language, title = stringResource(R.string.row_language),
                     subtitle = languages.find { it.first == languageTag }?.second ?: "English",
                     onClick = { languageMenu = true }
                 )
@@ -659,19 +700,19 @@ private fun SettingsScreen(vm: MainViewModel) {
                     }
                 }
             }
-            SettingsToggleRow(icon = Icons.Default.Notifications, title = "Notifications", subtitle = "Enable download notifications", checked = notifications, onCheckedChange = { notifications = it; settings.notifications = it })
+            SettingsToggleRow(icon = Icons.Default.Notifications, title = stringResource(R.string.row_notifications), subtitle = stringResource(R.string.row_notifications_desc), checked = notifications, onCheckedChange = { notifications = it; settings.notifications = it })
         }
         Spacer(Modifier.height(6.dp))
-        Text("App text is currently English-only; language switch affects the system locale for now.", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+        Text(stringResource(R.string.language_note), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
 
         Spacer(Modifier.height(20.dp))
         SettingsSection(title = "Advanced") {
-            SettingsToggleRow(icon = Icons.Default.Autorenew, title = "Auto resume", subtitle = "Resume after app restart", checked = autoResume, onCheckedChange = { autoResume = it; settings.autoResume = it })
+            SettingsToggleRow(icon = Icons.Default.Autorenew, title = stringResource(R.string.row_auto_resume), subtitle = stringResource(R.string.row_auto_resume_desc), checked = autoResume, onCheckedChange = { autoResume = it; settings.autoResume = it })
             Box {
-                SettingsRow(icon = Icons.Default.Replay, title = "Retry on failure", subtitle = "$retryAttempts attempts", onClick = { retryMenu = true })
+                SettingsRow(icon = Icons.Default.Replay, title = stringResource(R.string.row_retry_on_failure), subtitle = stringResource(R.string.attempts_fmt, retryAttempts), onClick = { retryMenu = true })
                 DropdownMenu(expanded = retryMenu, onDismissRequest = { retryMenu = false }) {
                     listOf(0, 1, 2, 3, 5).forEach { n ->
-                        DropdownMenuItem(text = { Text("$n attempts") }, onClick = {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.attempts_fmt, n)) }, onClick = {
                             retryAttempts = n; settings.retryAttempts = n; retryMenu = false
                         })
                     }
@@ -683,10 +724,10 @@ private fun SettingsScreen(vm: MainViewModel) {
         Card(colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(14.dp)) {
             Column(Modifier.padding(16.dp)) {
                 Text("F2L Downloader", color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text("Version 1.0", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.dev_version), color = TextSecondary, style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(12.dp))
-                Text("Developed by", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-                Text("Goutham", color = TextPrimary, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.dev_developed_by), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                Text("Goutham Josh", color = TextPrimary, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
                 Text(
                     "github.com/GouthamSER",
                     color = AccentBlue, textDecoration = TextDecoration.Underline,
@@ -742,15 +783,15 @@ private fun SettingsToggleRow(icon: androidx.compose.ui.graphics.vector.ImageVec
 }
 
 @Composable
-private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit) {
+private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onOpen: () -> Unit) {
     val progress = if (item.totalBytes > 0) (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
     val (statusColor, statusLabel) = when (item.status) {
-        DownloadItem.Status.DOWNLOADING -> AccentBlue to "Downloading"
-        DownloadItem.Status.PAUSED -> AmberWarn to "Paused"
-        DownloadItem.Status.COMPLETED -> GreenOk to "Completed"
-        DownloadItem.Status.FAILED -> RedErr to "Failed"
-        DownloadItem.Status.QUEUED -> TextSecondary to "Queued"
-        DownloadItem.Status.CANCELED -> TextSecondary to "Canceled"
+        DownloadItem.Status.DOWNLOADING -> AccentBlue to stringResource(R.string.status_downloading)
+        DownloadItem.Status.PAUSED -> AmberWarn to stringResource(R.string.status_paused)
+        DownloadItem.Status.COMPLETED -> GreenOk to stringResource(R.string.status_completed)
+        DownloadItem.Status.FAILED -> RedErr to stringResource(R.string.status_failed)
+        DownloadItem.Status.QUEUED -> TextSecondary to stringResource(R.string.status_queued)
+        DownloadItem.Status.CANCELED -> TextSecondary to stringResource(R.string.status_canceled)
     }
 
     Scaffold(
@@ -759,8 +800,8 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
             TopAppBar(
                 title = { Text(item.fileName, maxLines = 1) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = BgDark, titleContentColor = TextPrimary),
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = TextPrimary) } },
-                actions = { IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, "Delete", tint = RedErr) } }
+                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) } },
+                actions = { IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = RedErr) } }
             )
         }
     ) { pad ->
@@ -786,28 +827,33 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
 
             Card(colors = CardDefaults.cardColors(containerColor = Surface1), shape = RoundedCornerShape(16.dp)) {
                 Column(Modifier.padding(horizontal = 16.dp)) {
-                    DetailRow("Downloaded", "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}")
+                    DetailRow(stringResource(R.string.detail_downloaded), "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}")
                     if (item.status == DownloadItem.Status.DOWNLOADING) {
-                        DetailRow("Speed", if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else "Calculating…")
-                        DetailRow("ETA", if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else "Calculating…")
+                        DetailRow(stringResource(R.string.detail_speed), if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else stringResource(R.string.calculating))
+                        DetailRow(stringResource(R.string.detail_eta), if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else stringResource(R.string.calculating))
                     }
-                    DetailRow("Connections", "${item.connections} threads")
-                    DetailRow("File name", item.fileName)
-                    DetailRow("Save folder", Uri.parse(item.folderUri).lastPathSegment ?: item.folderUri)
-                    DetailRow("Source URL", item.url, isLast = item.error == null)
-                    if (item.error != null) DetailRow("Error", item.error!!, RedErr, isLast = true)
+                    DetailRow(stringResource(R.string.detail_connections), "${item.connections} threads")
+                    DetailRow(stringResource(R.string.detail_filename), item.fileName)
+                    DetailRow(stringResource(R.string.detail_save_folder), Uri.parse(item.folderUri).lastPathSegment ?: item.folderUri)
+                    DetailRow(stringResource(R.string.detail_source_url), item.url, isLast = item.error == null)
+                    if (item.error != null) DetailRow(stringResource(R.string.detail_error), item.error!!, RedErr, isLast = true)
                 }
             }
 
             Spacer(Modifier.height(24.dp))
             when (item.status) {
                 DownloadItem.Status.DOWNLOADING -> OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text("Pause", color = TextPrimary)
+                    Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
                 }
                 DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> Button(
                     onClick = onResume, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
                 ) {
-                    Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(if (item.status == DownloadItem.Status.FAILED) "Retry" else "Resume")
+                    Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(if (item.status == DownloadItem.Status.FAILED) stringResource(R.string.action_retry) else stringResource(R.string.action_resume))
+                }
+                DownloadItem.Status.COMPLETED -> Button(
+                    onClick = onOpen, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                ) {
+                    Icon(Icons.Default.OpenInNew, null); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_open_file))
                 }
                 else -> {}
             }

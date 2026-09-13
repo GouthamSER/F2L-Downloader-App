@@ -42,11 +42,12 @@ class DownloadService : Service() {
                 val notificationsOn = intent.getBooleanExtra("notifications", true)
                 if (jobs.containsKey(id)) return START_NOT_STICKY
 
-                startForeground(1001, notification("Downloading $name"))
+                startForeground(1001, notification("F2L Downloader", "Starting $name…"))
                 val job = scope.launch {
                     var attempt = 0
                     while (true) {
                         try {
+                            var lastNotify = 0L
                             engine.download(url, name, Uri.parse(tree), connections) { p ->
                                 sendBroadcast(Intent(ACTION_PROGRESS).apply {
                                     setPackage(packageName)
@@ -55,11 +56,26 @@ class DownloadService : Service() {
                                     putExtra("total", p.total)
                                     putExtra("speed", p.speed)
                                 })
-                                if (notificationsOn) {
-                                    val percent = if (p.total > 0) p.downloaded * 100 / p.total else 0
-                                    getSystemService(NotificationManager::class.java)
-                                        .notify(1001, notification("$name • $percent%"))
+                                val now = System.currentTimeMillis()
+                                if (notificationsOn && now - lastNotify > 800) {
+                                    lastNotify = now
+                                    val percent = if (p.total > 0) (p.downloaded * 100 / p.total).toInt() else 0
+                                    val speedText = formatSpeed(p.speed)
+                                    val etaText = if (p.total > p.downloaded && p.speed > 0) formatEta((p.total - p.downloaded) / p.speed) else "--:--"
+                                    getSystemService(NotificationManager::class.java).notify(
+                                        1001,
+                                        notification(
+                                            name,
+                                            "$percent% • $speedText • ETA $etaText",
+                                            progressPercent = percent,
+                                            indeterminate = p.total <= 0
+                                        )
+                                    )
                                 }
+                            }
+                            if (notificationsOn) {
+                                getSystemService(NotificationManager::class.java)
+                                    .notify(1001, notification(name, "Download complete", progressPercent = 100))
                             }
                             sendBroadcast(Intent(ACTION_FINISHED).setPackage(packageName).putExtra("id", id))
                             break
@@ -115,13 +131,30 @@ class DownloadService : Service() {
         }
     }
 
-    private fun notification(text: String): Notification =
+    private fun notification(title: String, text: String, progressPercent: Int? = null, indeterminate: Boolean = false): Notification =
         NotificationCompat.Builder(this, "downloads")
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentTitle("F2L Downloader")
+            .setContentTitle(title)
             .setContentText(text)
-            .setOngoing(true)
+            .setOngoing(progressPercent == null || progressPercent < 100)
+            .apply {
+                if (progressPercent != null) setProgress(100, progressPercent, indeterminate)
+            }
             .build()
+
+    private fun formatSpeed(bytesPerSec: Long): String {
+        if (bytesPerSec <= 0) return "0 B/s"
+        val units = arrayOf("B/s", "KB/s", "MB/s", "GB/s")
+        var v = bytesPerSec.toDouble(); var i = 0
+        while (v >= 1024 && i < units.lastIndex) { v /= 1024; i++ }
+        return String.format(java.util.Locale.US, "%.1f %s", v, units[i])
+    }
+
+    private fun formatEta(totalSeconds: Long): String {
+        val m = totalSeconds / 60
+        val s = totalSeconds % 60
+        return String.format(java.util.Locale.US, "%d:%02d", m, s)
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onDestroy() {
