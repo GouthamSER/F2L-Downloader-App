@@ -264,16 +264,16 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
         Scaffold(
             containerColor = Color.Transparent,
             topBar = {
-                TopAppBar(
-                    title = {
-                        Text(buildString {
-                            append("F2L ")
-                        })
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = TextPrimary),
-                    navigationIcon = { Icon(Icons.Default.Download, null, Modifier.padding(start = 12.dp), tint = AccentBlue) },
-                    modifier = Modifier.padding(top = 6.dp, start = 12.dp, end = 12.dp).glass(radius = 18.dp)
-                )
+                Row(
+                    Modifier.padding(top = 10.dp, start = 14.dp)
+                        .glass(radius = 50.dp)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Download, null, tint = AccentBlue, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("F2L", color = TextPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                }
             },
             floatingActionButton = {
                 if (tab == Tab.HOME || tab == Tab.DOWNLOADS) {
