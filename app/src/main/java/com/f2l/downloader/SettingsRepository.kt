@@ -33,9 +33,4 @@ class SettingsRepository(context: Context) {
     var themeMode: String
         get() = prefs.getString("theme_mode", "dark") ?: "dark"
         set(v) = prefs.edit().putString("theme_mode", v).apply()
-
-    /** BCP-47 tag, e.g. "en", "hi", "ml", "ta" */
-    var languageTag: String
-        get() = prefs.getString("language_tag", "en") ?: "en"
-        set(v) = prefs.edit().putString("language_tag", v).apply()
 }

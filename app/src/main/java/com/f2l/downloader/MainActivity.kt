@@ -312,11 +312,31 @@ private fun DownloadListScreen(
     }
 
     var selected by remember { mutableStateOf<DownloadItem?>(null) }
+    var pendingDelete by remember { mutableStateOf<DownloadItem?>(null) }
+
+    pendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete download?") },
+            text = { Text("\"${target.fileName}\" will be permanently deleted from your device. This can't be undone.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    vm.delete(target)
+                    if (selected?.id == target.id) selected = null
+                    pendingDelete = null
+                }) { Text("Yes, delete", color = RedErr) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("No") }
+            }
+        )
+    }
+
     selected?.let { sel ->
         val live = items.find { it.id == sel.id } ?: sel
         DownloadDetailScreen(
             live, onBack = { selected = null }, onPause = { vm.pause(live) }, onResume = { vm.start(live) },
-            onDelete = { vm.delete(live); selected = null },
+            onDelete = { pendingDelete = live },
             onOpen = { openDownloadedFile(context, live) }
         )
         return
@@ -357,7 +377,7 @@ private fun DownloadListScreen(
                         item,
                         onPause = { vm.pause(item) },
                         onResume = { vm.start(item) },
-                        onDelete = { vm.delete(item) },
+                        onDelete = { pendingDelete = item },
                         onClick = {
                             if (item.status == DownloadItem.Status.COMPLETED) openDownloadedFile(context, item)
                             else selected = item
@@ -625,11 +645,7 @@ private fun SettingsScreen(vm: MainViewModel) {
     var connectionsMenu by remember { mutableStateOf(false) }
     var retryMenu by remember { mutableStateOf(false) }
     var appearanceMenu by remember { mutableStateOf(false) }
-    var languageMenu by remember { mutableStateOf(false) }
     var themeMode by remember { mutableStateOf(settings.themeMode) }
-    var languageTag by remember { mutableStateOf(settings.languageTag) }
-
-    val languages = listOf("en" to "English", "hi" to "हिन्दी (Hindi)", "ml" to "മലയാളം (Malayalam)", "ta" to "தமிழ் (Tamil)")
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -681,29 +697,8 @@ private fun SettingsScreen(vm: MainViewModel) {
                     })
                 }
             }
-            Box {
-                SettingsRow(
-                    icon = Icons.Default.Language, title = stringResource(R.string.row_language),
-                    subtitle = languages.find { it.first == languageTag }?.second ?: "English",
-                    onClick = { languageMenu = true }
-                )
-                DropdownMenu(expanded = languageMenu, onDismissRequest = { languageMenu = false }) {
-                    languages.forEach { (tag, label) ->
-                        DropdownMenuItem(text = { Text(label) }, onClick = {
-                            languageMenu = false
-                            languageTag = tag
-                            settings.languageTag = tag
-                            androidx.appcompat.app.AppCompatDelegate.setApplicationLocales(
-                                androidx.core.os.LocaleListCompat.forLanguageTags(tag)
-                            )
-                        })
-                    }
-                }
-            }
             SettingsToggleRow(icon = Icons.Default.Notifications, title = stringResource(R.string.row_notifications), subtitle = stringResource(R.string.row_notifications_desc), checked = notifications, onCheckedChange = { notifications = it; settings.notifications = it })
         }
-        Spacer(Modifier.height(6.dp))
-        Text(stringResource(R.string.language_note), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
 
         Spacer(Modifier.height(20.dp))
         SettingsSection(title = "Advanced") {
