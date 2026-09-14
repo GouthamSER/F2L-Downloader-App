@@ -12,12 +12,16 @@ import org.libtorrent4j.alerts.TorrentErrorAlert
 import java.io.File
 
 /**
- * BitTorrent engine backed by frostwire-jlibtorrent — real native libtorrent bindings with
- * prebuilt Android .so binaries (used in production by FrostWire itself), not a pure-Java
- * reflection-heavy library. An earlier attempt used "bt" (bt-core), which depends on Guice;
- * Guice's method interception calls Class.getAnnotatedSuperclass(), which Android's ART
- * runtime doesn't actually implement despite declaring it — a hard, unfixable-from-app-code
- * crash. libtorrent is C++ with a thin JNI layer, so it doesn't hit that class of problem.
+ * BitTorrent engine backed by org.libtorrent4j — real native libtorrent bindings with
+ * prebuilt Android .so binaries. Two earlier attempts hit real walls:
+ *  - "bt" (bt-core): Guice-based, hits Class.getAnnotatedSuperclass() which Android's ART
+ *    doesn't implement — not fixable from app code.
+ *  - com.frostwire:jlibtorrent: same underlying library, but its distribution host
+ *    (dl.frostwire.com/maven) is dead.
+ * org.libtorrent4j is the same author's actively-maintained republish on real Maven Central,
+ * but its actual method signatures have drifted from the old frostwire fork — notably there's
+ * no download(String magnetUri, File) shortcut anymore. Magnet links go through
+ * fetchMagnet() (blocking, hence run off the main thread) -> TorrentInfo -> download(TorrentInfo, File).
  *
  * Saves to the app's own external files directory (plain filesystem path), not the SAF
  * folder used for direct HTTP downloads — libtorrent writes real files, not SAF tree Uris.
@@ -32,7 +36,7 @@ object TorrentEngine {
     fun saveDir(context: android.content.Context): File =
         File(context.getExternalFilesDir(null), "Torrents").apply { mkdirs() }
 
-    /** Starts a magnet-link download. */
+    /** Starts a magnet-link download. fetchMagnet() blocks waiting on DHT, so this runs on its own thread. */
     fun startMagnet(
         context: android.content.Context,
         id: Long,
@@ -42,8 +46,21 @@ object TorrentEngine {
         onDone: () -> Unit,
         onError: (String) -> Unit
     ) {
-        attachListenerAndStart(id, onNameKnown, onProgress, onDone, onError)
-        session.download(magnetUri, saveDir(context))
+        Thread {
+            try {
+                val data = session.fetchMagnet(magnetUri, 30)
+                if (data == null) {
+                    onError("Could not fetch torrent metadata (timed out)")
+                    return@Thread
+                }
+                val info = TorrentInfo(data)
+                onNameKnown(info.name() ?: "torrent")
+                attachListenerAndStart(id, onProgress, onDone, onError)
+                session.download(info, saveDir(context))
+            } catch (e: Exception) {
+                onError(e.message ?: "Magnet fetch failed")
+            }
+        }.start()
     }
 
     /** Starts a download from a picked .torrent file's raw bytes. */
@@ -56,10 +73,14 @@ object TorrentEngine {
         onDone: () -> Unit,
         onError: (String) -> Unit
     ) {
-        attachListenerAndStart(id, onNameKnown, onProgress, onDone, onError)
-        val info = TorrentInfo(torrentBytes)
-        onNameKnown(info.name() ?: "torrent")
-        session.download(info, saveDir(context))
+        try {
+            val info = TorrentInfo(torrentBytes)
+            onNameKnown(info.name() ?: "torrent")
+            attachListenerAndStart(id, onProgress, onDone, onError)
+            session.download(info, saveDir(context))
+        } catch (e: Exception) {
+            onError(e.message ?: "Invalid torrent file")
+        }
     }
 
     /** Pauses/cancels a running torrent by the id it was started with. */
@@ -69,7 +90,6 @@ object TorrentEngine {
 
     private fun attachListenerAndStart(
         id: Long,
-        onNameKnown: (String) -> Unit,
         onProgress: (percent: Int) -> Unit,
         onDone: () -> Unit,
         onError: (String) -> Unit
@@ -89,7 +109,6 @@ object TorrentEngine {
                             myHandle = handle
                             handles[id] = handle
                             handle.resume()
-                            runCatching { onNameKnown(handle.name() ?: "torrent") }
                         }
                     }
                     AlertType.PIECE_FINISHED -> {
@@ -111,7 +130,8 @@ object TorrentEngine {
                     AlertType.TORRENT_ERROR -> {
                         val handle = (alert as? TorrentErrorAlert)?.handle()
                         if (handle == null || handle == myHandle) {
-                            onError((alert as? TorrentErrorAlert)?.error()?.message() ?: "Torrent error")
+                            val message = (alert as? TorrentErrorAlert)?.error()?.message() ?: "Torrent error"
+                            onError(message)
                             handles.remove(id)
                             session.removeListener(this)
                         }
