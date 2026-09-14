@@ -50,8 +50,17 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-    implementation("com.github.atomashpolskiy:bt-core:1.10")
-    implementation("com.github.atomashpolskiy:bt-dht:1.10")
+
+    // BitTorrent (magnet links + .torrent files) — real native libtorrent bindings,
+    // used in production by FrostWire. bt-core (pure-Java, Guice-based) was tried first
+    // but Guice's reflection use (Class.getAnnotatedSuperclass) isn't supported by
+    // Android's ART runtime, causing a hard runtime crash — not fixable from app code.
+    val jlibtorrentVersion = "2.0.13.6"
+    implementation("com.frostwire:jlibtorrent:$jlibtorrentVersion")
+    implementation("com.frostwire:jlibtorrent-android-arm:$jlibtorrentVersion")
+    implementation("com.frostwire:jlibtorrent-android-arm64:$jlibtorrentVersion")
+    implementation("com.frostwire:jlibtorrent-android-x86:$jlibtorrentVersion")
+    implementation("com.frostwire:jlibtorrent-android-x86_64:$jlibtorrentVersion")
     debugImplementation(platform("androidx.compose:compose-bom:2024.12.01"))
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
