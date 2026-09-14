@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 import java.net.URLDecoder
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
@@ -22,6 +23,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun add(url: String, folder: Uri, fileName: String? = null, connections: Int = 8, autoStart: Boolean = true) {
         val clean = url.trim()
+        if (clean.startsWith("magnet:")) { addMagnet(clean); return }
         if (!clean.startsWith("http://") && !clean.startsWith("https://")) return
         val requestedName = fileName?.trim().takeUnless { it.isNullOrBlank() }
         val id = System.currentTimeMillis()
@@ -47,7 +49,47 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Magnet links and .torrent files run through TorrentService (pure-Java "bt" library, no
+     *  external binary). They save to the app's own external files dir, not the SAF folder used
+     *  for direct HTTP links — bt writes plain filesystem paths, not SAF tree Uris. */
+    fun addMagnet(magnetUri: String) {
+        val id = System.currentTimeMillis()
+        val item = DownloadItem(
+            id = id, url = magnetUri, fileName = "Fetching torrent metadata…",
+            folderUri = TorrentEngine.saveDir(getApplication()).absolutePath,
+            isTorrent = true, status = DownloadItem.Status.DOWNLOADING
+        )
+        setItems(listOf(item) + _items.value)
+        val i = Intent(getApplication(), TorrentService::class.java).apply {
+            action = TorrentService.ACTION_START_MAGNET
+            putExtra("id", id)
+            putExtra("magnet", magnetUri)
+        }
+        ContextCompat.startForegroundService(getApplication(), i)
+    }
+
+    fun addTorrentFile(bytes: ByteArray, displayName: String) {
+        val id = System.currentTimeMillis()
+        val item = DownloadItem(
+            id = id, url = "torrent:$displayName", fileName = displayName,
+            folderUri = TorrentEngine.saveDir(getApplication()).absolutePath,
+            isTorrent = true, status = DownloadItem.Status.DOWNLOADING
+        )
+        setItems(listOf(item) + _items.value)
+        val i = Intent(getApplication(), TorrentService::class.java).apply {
+            action = TorrentService.ACTION_START_FILE
+            putExtra("id", id)
+            putExtra("torrentBytes", bytes)
+        }
+        ContextCompat.startForegroundService(getApplication(), i)
+    }
+
     fun start(item: DownloadItem) {
+        if (item.isTorrent) {
+            // torrents don't carry a magnet uri round-trip here; re-adding an already-fetched
+            // torrent from scratch isn't supported yet — resume/pause for torrents is TODO.
+            return
+        }
         if (settings.wifiOnly && !isOnWifi()) {
             update(item.id) { it.copy(status = DownloadItem.Status.FAILED, error = "Waiting for Wi-Fi") }
             return
@@ -67,6 +109,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun pause(item: DownloadItem) {
+        if (item.isTorrent) {
+            getApplication<Application>().startService(
+                Intent(getApplication(), TorrentService::class.java)
+                    .setAction(TorrentService.ACTION_CANCEL)
+                    .putExtra("id", item.id)
+            )
+            update(item.id) { it.copy(status = DownloadItem.Status.PAUSED) }
+            return
+        }
         getApplication<Application>().startService(
             Intent(getApplication(), DownloadService::class.java)
                 .setAction(DownloadService.ACTION_PAUSE)
@@ -76,6 +127,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun delete(item: DownloadItem) {
+        if (item.isTorrent) {
+            getApplication<Application>().startService(
+                Intent(getApplication(), TorrentService::class.java)
+                    .setAction(TorrentService.ACTION_CANCEL)
+                    .putExtra("id", item.id)
+            )
+            runCatching { File(item.folderUri, item.fileName).delete() }
+            setItems(_items.value.filterNot { it.id == item.id })
+            return
+        }
         getApplication<Application>().startService(
             Intent(getApplication(), DownloadService::class.java)
                 .setAction(DownloadService.ACTION_CANCEL)

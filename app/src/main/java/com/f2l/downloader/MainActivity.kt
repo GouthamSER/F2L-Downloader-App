@@ -20,6 +20,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -224,6 +225,7 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
     if (showAddScreen) {
         BackHandler { showAddScreen = false }
         AddDownloadScreen(
+            vm = vm,
             initialUrl = prefillUrl,
             defaultConnections = vm.settings.defaultConnections,
             defaultFolder = vm.settings.defaultFolderUri?.let { runCatching { Uri.parse(it) }.getOrNull() },
@@ -265,7 +267,7 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
             containerColor = Color.Transparent,
             topBar = {
                 Row(
-                    Modifier.padding(top = 10.dp, start = 14.dp)
+                    Modifier.statusBarsPadding().padding(top = 6.dp, start = 14.dp)
                         .glass(radius = 50.dp)
                         .padding(horizontal = 14.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
@@ -424,20 +426,30 @@ private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
     }
 }
 
+private fun resolveContentUri(context: android.content.Context, item: DownloadItem): Uri? {
+    return if (item.isTorrent) {
+        val file = java.io.File(item.folderUri, item.fileName)
+        if (!file.exists()) null
+        else androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    } else {
+        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(item.folderUri))
+        tree?.findFile(item.fileName)?.takeIf { it.exists() }?.uri
+    }
+}
+
 private fun shareDownloadedFile(context: android.content.Context, item: DownloadItem) {
     try {
-        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(item.folderUri))
-        val file = tree?.findFile(item.fileName)
-        if (file == null || !file.exists()) {
+        val uri = resolveContentUri(context, item)
+        if (uri == null) {
             android.widget.Toast.makeText(context, "File not found — it may have been moved or deleted", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
         val ext = item.fileName.substringAfterLast('.', "").lowercase()
         val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-            ?: context.contentResolver.getType(file.uri) ?: "*/*"
+            ?: context.contentResolver.getType(uri) ?: "*/*"
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = mime
-            putExtra(Intent.EXTRA_STREAM, file.uri)
+            putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(intent, "Share ${item.fileName}"))
@@ -448,9 +460,8 @@ private fun shareDownloadedFile(context: android.content.Context, item: Download
 
 private fun openDownloadedFile(context: android.content.Context, item: DownloadItem) {
     try {
-        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(item.folderUri))
-        val file = tree?.findFile(item.fileName)
-        if (file == null || !file.exists()) {
+        val uri = resolveContentUri(context, item)
+        if (uri == null) {
             android.widget.Toast.makeText(context, "File not found — it may have been moved or deleted", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
@@ -460,10 +471,10 @@ private fun openDownloadedFile(context: android.content.Context, item: DownloadI
         // would never run if checked second — that was the actual bug stopping files opening.
         val ext = item.fileName.substringAfterLast('.', "").lowercase()
         val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-            ?: context.contentResolver.getType(file.uri)
+            ?: context.contentResolver.getType(uri)
             ?: "*/*"
         val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(file.uri, mime)
+            setDataAndType(uri, mime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -614,7 +625,10 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
                     Text(item.fileName, color = TextPrimary, style = MaterialTheme.typography.titleSmall, maxLines = 1)
-                    Text("${formatBytes(item.totalBytes)} · ${item.connections} threads", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        if (item.isTorrent) "${item.peers} peers · torrent" else "${formatBytes(item.totalBytes)} · ${item.connections} threads",
+                        color = TextSecondary, style = MaterialTheme.typography.labelSmall
+                    )
                 }
                 IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = TextSecondary) }
             }
@@ -622,7 +636,10 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             F2LProgressBar(progress = progress, color = statusColor, height = 8.dp)
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text("${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                Text(
+                    if (item.isTorrent) "${item.downloadedBytes}/${item.totalBytes} pieces" else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}",
+                    color = TextSecondary, style = MaterialTheme.typography.labelSmall
+                )
                 Text(statusLabel, color = statusColor, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
             }
             if (item.status == DownloadItem.Status.DOWNLOADING) {
@@ -709,6 +726,7 @@ private fun FilesScreen(items: List<DownloadItem>) {
 
 @Composable
 private fun AddDownloadScreen(
+    vm: MainViewModel,
     initialUrl: String,
     defaultConnections: Int = 8,
     defaultFolder: Uri? = null,
@@ -731,8 +749,16 @@ private fun AddDownloadScreen(
             folder = uri
         }
     }
+    val torrentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "torrent-${System.currentTimeMillis()}.torrent"
+            if (bytes != null) { vm.addTorrentFile(bytes, name); onBack() }
+        }
+    }
 
-    val urlValid = url.startsWith("http://") || url.startsWith("https://")
+    val isMagnet = url.trim().startsWith("magnet:")
+    val urlValid = isMagnet || url.startsWith("http://") || url.startsWith("https://")
 
     GlassBackground {
     Scaffold(
@@ -747,49 +773,62 @@ private fun AddDownloadScreen(
             )
         }
     ) { pad ->
-        Column(Modifier.padding(pad).padding(16.dp).fillMaxSize()) {
-            Text(stringResource(R.string.label_url), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+        Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
+            Text("URL or magnet link", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
             OutlinedTextField(
                 value = url, onValueChange = { url = it },
                 modifier = Modifier.fillMaxWidth(), singleLine = true,
-                placeholder = { Text(stringResource(R.string.hint_url)) }
+                placeholder = { Text("https://example.com/file.zip or magnet:?xt=...") }
             )
-            Spacer(Modifier.height(16.dp))
-
-            Text(stringResource(R.string.label_filename), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(4.dp))
-            OutlinedTextField(
-                value = fileName, onValueChange = { fileName = it },
-                modifier = Modifier.fillMaxWidth(), singleLine = true,
-                placeholder = { Text(stringResource(R.string.hint_filename)) }
-            )
-            Spacer(Modifier.height(16.dp))
-
-            Text(stringResource(R.string.label_save_to), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(4.dp))
-            OutlinedButton(onClick = { picker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Default.Folder, null, tint = TextPrimary)
-                Spacer(Modifier.width(8.dp))
-                Text(if (folder == null) stringResource(R.string.action_choose_folder) else stringResource(R.string.folder_selected), color = TextPrimary)
+            if (isMagnet) {
+                Spacer(Modifier.height(4.dp))
+                Text("Magnet link — downloaded via the built-in BitTorrent engine, saves to F2L's own Torrents folder", color = AccentBlue, style = MaterialTheme.typography.labelSmall)
             }
             Spacer(Modifier.height(16.dp))
 
-            Text(stringResource(R.string.label_connections), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(4.dp))
-            Box {
-                OutlinedButton(onClick = { connectionsExpanded = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text("$connections threads" + if (connections == 8) " (recommended)" else "", color = TextPrimary, modifier = Modifier.weight(1f))
-                    Icon(Icons.Default.ArrowDropDown, null, tint = TextPrimary)
+            OutlinedButton(onClick = { torrentPicker.launch(arrayOf("application/x-bittorrent")) }, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.FolderZip, null, tint = TextPrimary)
+                Spacer(Modifier.width(8.dp))
+                Text("Or pick a .torrent file", color = TextPrimary)
+            }
+            Spacer(Modifier.height(16.dp))
+
+            if (!isMagnet) {
+                Text(stringResource(R.string.label_filename), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = fileName, onValueChange = { fileName = it },
+                    modifier = Modifier.fillMaxWidth(), singleLine = true,
+                    placeholder = { Text(stringResource(R.string.hint_filename)) }
+                )
+                Spacer(Modifier.height(16.dp))
+
+                Text(stringResource(R.string.label_save_to), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(4.dp))
+                OutlinedButton(onClick = { picker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Folder, null, tint = TextPrimary)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (folder == null) stringResource(R.string.action_choose_folder) else stringResource(R.string.folder_selected), color = TextPrimary)
                 }
-                DropdownMenu(expanded = connectionsExpanded, onDismissRequest = { connectionsExpanded = false }) {
-                    listOf(2, 4, 6, 8, 16).forEach { n ->
-                        DropdownMenuItem(text = { Text("$n threads" + if (n == 8) " (recommended)" else "") }, onClick = { connections = n; connectionsExpanded = false })
+                Spacer(Modifier.height(16.dp))
+
+                Text(stringResource(R.string.label_connections), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(4.dp))
+                Box {
+                    OutlinedButton(onClick = { connectionsExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text("$connections threads" + if (connections == 8) " (recommended)" else "", color = TextPrimary, modifier = Modifier.weight(1f))
+                        Icon(Icons.Default.ArrowDropDown, null, tint = TextPrimary)
+                    }
+                    DropdownMenu(expanded = connectionsExpanded, onDismissRequest = { connectionsExpanded = false }) {
+                        listOf(2, 4, 6, 8, 16).forEach { n ->
+                            DropdownMenuItem(text = { Text("$n threads" + if (n == 8) " (recommended)" else "") }, onClick = { connections = n; connectionsExpanded = false })
+                        }
                     }
                 }
+                Text(stringResource(R.string.connections_hint), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                Spacer(Modifier.height(16.dp))
             }
-            Text(stringResource(R.string.connections_hint), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-            Spacer(Modifier.height(16.dp))
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text(stringResource(R.string.label_start_immediately), color = TextPrimary)
@@ -798,11 +837,11 @@ private fun AddDownloadScreen(
                     colors = SwitchDefaults.colors(checkedTrackColor = AccentBlue)
                 )
             }
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(24.dp))
 
             Button(
-                onClick = { folder?.let { onStart(url.trim(), fileName, it, connections, autoStart) } },
-                enabled = urlValid && folder != null,
+                onClick = { onStart(url.trim(), fileName, folder ?: Uri.EMPTY, connections, autoStart) },
+                enabled = urlValid && (isMagnet || folder != null),
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
             ) {
@@ -1008,7 +1047,10 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
 
             Card(modifier = Modifier.fillMaxWidth().glass(radius = 20.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent), shape = RoundedCornerShape(16.dp)) {
                 Column(Modifier.padding(horizontal = 16.dp)) {
-                    DetailRow(stringResource(R.string.detail_downloaded), "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}")
+                    DetailRow(
+                        stringResource(R.string.detail_downloaded),
+                        if (item.isTorrent) "${item.downloadedBytes}/${item.totalBytes} pieces · ${item.peers} peers" else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
+                    )
                     if (item.status == DownloadItem.Status.DOWNLOADING) {
                         DetailRow(stringResource(R.string.detail_speed), if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else stringResource(R.string.calculating))
                         DetailRow(stringResource(R.string.detail_eta), if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else stringResource(R.string.calculating))
