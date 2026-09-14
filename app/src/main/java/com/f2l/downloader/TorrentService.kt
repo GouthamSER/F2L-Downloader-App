@@ -34,19 +34,18 @@ class TorrentService : Service() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
-    private fun buildNotification(title: String, text: String, percent: Int? = null): Notification =
+    private fun buildNotification(title: String, text: String): Notification =
         androidx.core.app.NotificationCompat.Builder(this, "downloads")
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(openAppIntent())
-            .setOngoing(percent == null || percent < 100)
-            .apply { if (percent != null) setProgress(100, percent, false) }
+            .setOngoing(true)
             .build()
 
-    private fun notify(id: Long, title: String, text: String, percent: Int?) {
+    private fun notify(id: Long, title: String, text: String) {
         getSystemService(NotificationManager::class.java)
-            .notify(2000 + id.toInt(), buildNotification(title, text, percent))
+            .notify(2000 + id.toInt(), buildNotification(title, text))
     }
 
     private fun onFinishedOrError(id: Long) {
@@ -62,13 +61,12 @@ class TorrentService : Service() {
 
                 val onFetched: (bt.metainfo.Torrent) -> Unit = { torrent ->
                     persist(id) { it.copy(fileName = torrent.name ?: it.fileName) }
+                    notify(id, "Torrent", "Downloading ${torrent.name ?: "torrent"}…")
                 }
-                val onProgress: (TorrentEngine.TorrentProgress) -> Unit = { p ->
-                    val status = if (p.done) DownloadItem.Status.COMPLETED else DownloadItem.Status.DOWNLOADING
-                    persist(id) { it.copy(status = status, downloadedBytes = p.piecesComplete.toLong(), totalBytes = p.piecesTotal.toLong(), peers = p.peers) }
-                    val pct = if (p.piecesTotal > 0) p.piecesComplete * 100 / p.piecesTotal else 0
-                    notify(id, "Torrent", "$pct% • ${p.peers} peers", pct)
-                    if (p.done) onFinishedOrError(id)
+                val onDone: () -> Unit = {
+                    persist(id) { it.copy(status = DownloadItem.Status.COMPLETED) }
+                    notify(id, "Torrent", "Download complete")
+                    onFinishedOrError(id)
                 }
                 val onError: (Throwable) -> Unit = { e ->
                     persist(id) { it.copy(status = DownloadItem.Status.FAILED, error = e.message ?: "Torrent failed") }
@@ -77,10 +75,10 @@ class TorrentService : Service() {
 
                 val client = if (intent.action == ACTION_START_MAGNET) {
                     val magnet = intent.getStringExtra("magnet") ?: return START_NOT_STICKY
-                    TorrentEngine.startMagnet(this, magnet, onFetched, onProgress, onError)
+                    TorrentEngine.startMagnet(this, magnet, onFetched, onDone, onError)
                 } else {
                     val bytes = intent.getByteArrayExtra("torrentBytes") ?: return START_NOT_STICKY
-                    TorrentEngine.startTorrentFile(this, bytes, onFetched, onProgress, onError)
+                    TorrentEngine.startTorrentFile(this, bytes, onFetched, onDone, onError)
                 }
                 clients[id] = client
             }

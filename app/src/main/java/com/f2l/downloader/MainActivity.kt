@@ -597,8 +597,11 @@ private fun F2LProgressBar(progress: Float, color: Color, height: androidx.compo
 
 @Composable
 private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onClick: () -> Unit) {
-    val progress = if (item.totalBytes > 0)
-        (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
+    val progress = when {
+        item.isTorrent -> if (item.status == DownloadItem.Status.COMPLETED) 1f else 0.5f
+        item.totalBytes > 0 -> (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f)
+        else -> 0f
+    }
 
     val (statusColor, statusLabel) = when (item.status) {
         DownloadItem.Status.DOWNLOADING -> AccentBlue to stringResource(R.string.status_downloading)
@@ -626,7 +629,7 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
                 Column(Modifier.weight(1f)) {
                     Text(item.fileName, color = TextPrimary, style = MaterialTheme.typography.titleSmall, maxLines = 1)
                     Text(
-                        if (item.isTorrent) "${item.peers} peers · torrent" else "${formatBytes(item.totalBytes)} · ${item.connections} threads",
+                        if (item.isTorrent) "Torrent" else "${formatBytes(item.totalBytes)} · ${item.connections} threads",
                         color = TextSecondary, style = MaterialTheme.typography.labelSmall
                     )
                 }
@@ -637,7 +640,7 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
-                    if (item.isTorrent) "${item.downloadedBytes}/${item.totalBytes} pieces" else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}",
+                    if (item.isTorrent) (if (item.status == DownloadItem.Status.COMPLETED) "Done" else "Downloading via peers…") else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}",
                     color = TextSecondary, style = MaterialTheme.typography.labelSmall
                 )
                 Text(statusLabel, color = statusColor, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
@@ -661,9 +664,11 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             }
             when (item.status) {
                 DownloadItem.Status.DOWNLOADING -> {
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
+                    if (!item.isTorrent) {
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
+                            Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
+                        }
                     }
                 }
                 DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> {
@@ -1002,7 +1007,11 @@ private fun SettingsToggleRow(icon: androidx.compose.ui.graphics.vector.ImageVec
 @Composable
 private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onOpen: () -> Unit, onShare: () -> Unit) {
     BackHandler(onBack = onBack)
-    val progress = if (item.totalBytes > 0) (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
+    val progress = when {
+        item.isTorrent -> if (item.status == DownloadItem.Status.COMPLETED) 1f else 0.5f
+        item.totalBytes > 0 -> (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f)
+        else -> 0f
+    }
     val (statusColor, statusLabel) = when (item.status) {
         DownloadItem.Status.DOWNLOADING -> AccentBlue to stringResource(R.string.status_downloading)
         DownloadItem.Status.PAUSED -> AmberWarn to stringResource(R.string.status_paused)
@@ -1049,13 +1058,13 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
                 Column(Modifier.padding(horizontal = 16.dp)) {
                     DetailRow(
                         stringResource(R.string.detail_downloaded),
-                        if (item.isTorrent) "${item.downloadedBytes}/${item.totalBytes} pieces · ${item.peers} peers" else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
+                        if (item.isTorrent) (if (item.status == DownloadItem.Status.COMPLETED) "Done — via BitTorrent" else "Downloading via peers (BitTorrent)…") else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
                     )
-                    if (item.status == DownloadItem.Status.DOWNLOADING) {
+                    if (!item.isTorrent && item.status == DownloadItem.Status.DOWNLOADING) {
                         DetailRow(stringResource(R.string.detail_speed), if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else stringResource(R.string.calculating))
                         DetailRow(stringResource(R.string.detail_eta), if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else stringResource(R.string.calculating))
                     }
-                    DetailRow(stringResource(R.string.detail_connections), "${item.connections} threads")
+                    if (!item.isTorrent) DetailRow(stringResource(R.string.detail_connections), "${item.connections} threads")
                     DetailRow(stringResource(R.string.detail_filename), item.fileName)
                     DetailRow(stringResource(R.string.detail_save_folder), Uri.parse(item.folderUri).lastPathSegment ?: item.folderUri)
                     DetailRow(stringResource(R.string.detail_source_url), item.url, isLast = item.error == null)
@@ -1065,7 +1074,7 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
 
             Spacer(Modifier.height(24.dp))
             when (item.status) {
-                DownloadItem.Status.DOWNLOADING -> OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
+                DownloadItem.Status.DOWNLOADING -> if (!item.isTorrent) OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
                 }
                 DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> Button(

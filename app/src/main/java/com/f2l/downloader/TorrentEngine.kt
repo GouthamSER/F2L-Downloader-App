@@ -2,14 +2,14 @@ package com.f2l.downloader
 
 import bt.Bt
 import bt.data.Storage
+import bt.data.file.FileSystemStorage
 import bt.dht.DHTConfig
 import bt.dht.DHTModule
+import bt.metainfo.MetadataService
+import bt.metainfo.Torrent
 import bt.runtime.BtClient
 import bt.runtime.Config
-import bt.torrent.TorrentSessionState
-import bt.data.file.FileSystemStorage
-import bt.metainfo.Torrent
-import bt.torrent.fileselector.TorrentFileSelector
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.function.Consumer
 
@@ -20,62 +20,41 @@ import java.util.function.Consumer
  * IMPORTANT: bt writes to a plain filesystem File, not a SAF tree Uri, so torrent
  * downloads land in the app's own external files directory (no runtime permission
  * needed) rather than the user-picked SAF download folder that direct HTTP links use.
+ *
+ * Progress reporting intentionally sticks to only bt-core's confirmed, documented API
+ * (BtClient#startAsync(Consumer<TorrentSessionState>, long) and
+ * TorrentSessionState#getPiecesRemaining()) rather than guessing at less-documented
+ * getters, to keep this buildable against the real 1.10 jar.
  */
 object TorrentEngine {
 
-    data class TorrentProgress(val piecesComplete: Int, val piecesTotal: Int, val peers: Int, val done: Boolean)
-
     fun saveDir(context: android.content.Context): File =
         File(context.getExternalFilesDir(null), "Torrents").apply { mkdirs() }
+
+    private fun config() = object : Config() {
+        override fun getNumOfHashingThreads(): Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+    }
+
+    private fun dhtModule() = DHTModule(object : DHTConfig() {
+        override fun shouldUseRouterBootstrap(): Boolean = true
+    })
 
     /** Starts a magnet-link download. Call client.stop() to cancel/pause. */
     fun startMagnet(
         context: android.content.Context,
         magnetUri: String,
         onTorrentFetched: (Torrent) -> Unit,
-        onProgress: (TorrentProgress) -> Unit,
-        onError: (Throwable) -> Unit
-    ): BtClient = startInternal(
-        context,
-        builder = { storage -> Bt.client().storage(storage).magnet(magnetUri) },
-        onTorrentFetched, onProgress, onError
-    )
-
-    /** Starts a download from a picked .torrent file's raw bytes. */
-    fun startTorrentFile(
-        context: android.content.Context,
-        torrentBytes: ByteArray,
-        onTorrentFetched: (Torrent) -> Unit,
-        onProgress: (TorrentProgress) -> Unit,
-        onError: (Throwable) -> Unit
-    ): BtClient = startInternal(
-        context,
-        builder = { storage ->
-            Bt.client().storage(storage).torrent { java.io.ByteArrayInputStream(torrentBytes) }
-        },
-        onTorrentFetched, onProgress, onError
-    )
-
-    private fun startInternal(
-        context: android.content.Context,
-        builder: (Storage) -> bt.BtClientBuilder<*>,
-        onTorrentFetched: (Torrent) -> Unit,
-        onProgress: (TorrentProgress) -> Unit,
+        onDone: () -> Unit,
         onError: (Throwable) -> Unit
     ): BtClient {
         val storage: Storage = FileSystemStorage(saveDir(context).toPath())
-        val config = object : Config() {
-            override fun getNumOfHashingThreads(): Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
-        }
-        val dhtModule = DHTModule(object : DHTConfig() {
-            override fun shouldUseRouterBootstrap(): Boolean = true
-        })
-
         val client = try {
-            builder(storage)
-                .config(config)
+            Bt.client()
+                .config(config())
+                .storage(storage)
+                .magnet(magnetUri)
                 .autoLoadModules()
-                .module(dhtModule)
+                .module(dhtModule())
                 .afterTorrentFetched(Consumer { t -> onTorrentFetched(t) })
                 .stopWhenDownloaded()
                 .build()
@@ -83,13 +62,38 @@ object TorrentEngine {
             onError(e)
             throw e
         }
+        client.startAsync(Consumer { state ->
+            if (state.piecesRemaining == 0) onDone()
+        }, 1000)
+        return client
+    }
 
-        client.startAsync(Consumer<TorrentSessionState> { state ->
-            val total = state.piecesTotal
-            val complete = state.piecesComplete
-            onProgress(TorrentProgress(complete, total, state.connectedSeeders + state.connectedLeechers, complete >= total && total > 0))
-        }, 1000).exceptionally { t -> onError(t); null }
-
+    /** Starts a download from a picked .torrent file's raw bytes. */
+    fun startTorrentFile(
+        context: android.content.Context,
+        torrentBytes: ByteArray,
+        onTorrentFetched: (Torrent) -> Unit,
+        onDone: () -> Unit,
+        onError: (Throwable) -> Unit
+    ): BtClient {
+        val storage: Storage = FileSystemStorage(saveDir(context).toPath())
+        val client = try {
+            Bt.client()
+                .config(config())
+                .storage(storage)
+                .torrent { ByteArrayInputStream(torrentBytes).use { MetadataService().fromInputStream(it) } }
+                .autoLoadModules()
+                .module(dhtModule())
+                .afterTorrentFetched(Consumer { t -> onTorrentFetched(t) })
+                .stopWhenDownloaded()
+                .build()
+        } catch (e: Throwable) {
+            onError(e)
+            throw e
+        }
+        client.startAsync(Consumer { state ->
+            if (state.piecesRemaining == 0) onDone()
+        }, 1000)
         return client
     }
 }
