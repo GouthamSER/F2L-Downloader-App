@@ -1,14 +1,14 @@
 package com.f2l.downloader
 
-import com.frostwire.jlibtorrent.AlertListener
-import com.frostwire.jlibtorrent.SessionManager
-import com.frostwire.jlibtorrent.TorrentHandle
-import com.frostwire.jlibtorrent.TorrentInfo
-import com.frostwire.jlibtorrent.alerts.AddTorrentAlert
-import com.frostwire.jlibtorrent.alerts.Alert
-import com.frostwire.jlibtorrent.alerts.AlertType
-import com.frostwire.jlibtorrent.alerts.TorrentAlert
-import com.frostwire.jlibtorrent.alerts.TorrentErrorAlert
+import org.libtorrent4j.AlertListener
+import org.libtorrent4j.SessionManager
+import org.libtorrent4j.TorrentHandle
+import org.libtorrent4j.TorrentInfo
+import org.libtorrent4j.alerts.AddTorrentAlert
+import org.libtorrent4j.alerts.Alert
+import org.libtorrent4j.alerts.AlertType
+import org.libtorrent4j.alerts.TorrentAlert
+import org.libtorrent4j.alerts.TorrentErrorAlert
 import java.io.File
 
 /**
