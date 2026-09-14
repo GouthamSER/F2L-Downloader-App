@@ -1,99 +1,125 @@
 package com.f2l.downloader
 
-import bt.Bt
-import bt.data.Storage
-import bt.data.file.FileSystemStorage
-import bt.dht.DHTConfig
-import bt.dht.DHTModule
-import bt.metainfo.MetadataService
-import bt.metainfo.Torrent
-import bt.runtime.BtClient
-import bt.runtime.Config
-import java.io.ByteArrayInputStream
+import com.frostwire.jlibtorrent.AlertListener
+import com.frostwire.jlibtorrent.SessionManager
+import com.frostwire.jlibtorrent.TorrentHandle
+import com.frostwire.jlibtorrent.TorrentInfo
+import com.frostwire.jlibtorrent.alerts.AddTorrentAlert
+import com.frostwire.jlibtorrent.alerts.Alert
+import com.frostwire.jlibtorrent.alerts.AlertType
+import com.frostwire.jlibtorrent.alerts.TorrentAlert
+import com.frostwire.jlibtorrent.alerts.TorrentErrorAlert
 import java.io.File
-import java.util.function.Consumer
 
 /**
- * Pure-Java BitTorrent client (the "bt" library) — runs in-process, no external
- * aria2c/libtorrent binary required. Handles magnet links and .torrent files.
+ * BitTorrent engine backed by frostwire-jlibtorrent — real native libtorrent bindings with
+ * prebuilt Android .so binaries (used in production by FrostWire itself), not a pure-Java
+ * reflection-heavy library. An earlier attempt used "bt" (bt-core), which depends on Guice;
+ * Guice's method interception calls Class.getAnnotatedSuperclass(), which Android's ART
+ * runtime doesn't actually implement despite declaring it — a hard, unfixable-from-app-code
+ * crash. libtorrent is C++ with a thin JNI layer, so it doesn't hit that class of problem.
  *
- * IMPORTANT: bt writes to a plain filesystem File, not a SAF tree Uri, so torrent
- * downloads land in the app's own external files directory (no runtime permission
- * needed) rather than the user-picked SAF download folder that direct HTTP links use.
- *
- * Progress reporting intentionally sticks to only bt-core's confirmed, documented API
- * (BtClient#startAsync(Consumer<TorrentSessionState>, long) and
- * TorrentSessionState#getPiecesRemaining()) rather than guessing at less-documented
- * getters, to keep this buildable against the real 1.10 jar.
+ * Saves to the app's own external files directory (plain filesystem path), not the SAF
+ * folder used for direct HTTP downloads — libtorrent writes real files, not SAF tree Uris.
  */
 object TorrentEngine {
+
+    // One session for the whole app process — starting a session (DHT bootstrap etc.) is
+    // relatively expensive, so it's created once, lazily, and kept running.
+    private val session: SessionManager by lazy { SessionManager().also { it.start() } }
+    private val handles = java.util.concurrent.ConcurrentHashMap<Long, TorrentHandle>()
 
     fun saveDir(context: android.content.Context): File =
         File(context.getExternalFilesDir(null), "Torrents").apply { mkdirs() }
 
-    private fun config() = object : Config() {
-        override fun getNumOfHashingThreads(): Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
-    }
-
-    private fun dhtModule() = DHTModule(object : DHTConfig() {
-        override fun shouldUseRouterBootstrap(): Boolean = true
-    })
-
-    /** Starts a magnet-link download. Call client.stop() to cancel/pause. */
+    /** Starts a magnet-link download. */
     fun startMagnet(
         context: android.content.Context,
+        id: Long,
         magnetUri: String,
-        onTorrentFetched: (Torrent) -> Unit,
+        onNameKnown: (String) -> Unit,
+        onProgress: (percent: Int) -> Unit,
         onDone: () -> Unit,
-        onError: (Throwable) -> Unit
-    ): BtClient {
-        val storage: Storage = FileSystemStorage(saveDir(context).toPath())
-        val client = try {
-            Bt.client()
-                .config(config())
-                .storage(storage)
-                .magnet(magnetUri)
-                .autoLoadModules()
-                .module(dhtModule())
-                .afterTorrentFetched(Consumer { t -> onTorrentFetched(t) })
-                .stopWhenDownloaded()
-                .build()
-        } catch (e: Throwable) {
-            onError(e)
-            throw e
-        }
-        client.startAsync(Consumer { state ->
-            if (state.piecesRemaining == 0) onDone()
-        }, 1000)
-        return client
+        onError: (String) -> Unit
+    ) {
+        attachListenerAndStart(id, onNameKnown, onProgress, onDone, onError)
+        session.download(magnetUri, saveDir(context))
     }
 
     /** Starts a download from a picked .torrent file's raw bytes. */
     fun startTorrentFile(
         context: android.content.Context,
+        id: Long,
         torrentBytes: ByteArray,
-        onTorrentFetched: (Torrent) -> Unit,
+        onNameKnown: (String) -> Unit,
+        onProgress: (percent: Int) -> Unit,
         onDone: () -> Unit,
-        onError: (Throwable) -> Unit
-    ): BtClient {
-        val storage: Storage = FileSystemStorage(saveDir(context).toPath())
-        val client = try {
-            Bt.client()
-                .config(config())
-                .storage(storage)
-                .torrent { ByteArrayInputStream(torrentBytes).use { MetadataService().fromInputStream(it) } }
-                .autoLoadModules()
-                .module(dhtModule())
-                .afterTorrentFetched(Consumer { t -> onTorrentFetched(t) })
-                .stopWhenDownloaded()
-                .build()
-        } catch (e: Throwable) {
-            onError(e)
-            throw e
+        onError: (String) -> Unit
+    ) {
+        attachListenerAndStart(id, onNameKnown, onProgress, onDone, onError)
+        val info = TorrentInfo(torrentBytes)
+        onNameKnown(info.name() ?: "torrent")
+        session.download(info, saveDir(context))
+    }
+
+    /** Pauses/cancels a running torrent by the id it was started with. */
+    fun cancel(id: Long) {
+        handles.remove(id)?.let { runCatching { it.pause() } }
+    }
+
+    private fun attachListenerAndStart(
+        id: Long,
+        onNameKnown: (String) -> Unit,
+        onProgress: (percent: Int) -> Unit,
+        onDone: () -> Unit,
+        onError: (String) -> Unit
+    ) {
+        var myHandle: TorrentHandle? = null
+
+        val listener = object : AlertListener {
+            override fun types(): IntArray? = null // all alert types; we filter in alert()
+
+            override fun alert(alert: Alert<*>) {
+                when (alert.type()) {
+                    AlertType.ADD_TORRENT -> {
+                        // The very next ADD_TORRENT after we call download() is ours —
+                        // lock onto it and make sure it actually starts.
+                        if (myHandle == null) {
+                            val handle = (alert as AddTorrentAlert).handle()
+                            myHandle = handle
+                            handles[id] = handle
+                            handle.resume()
+                            runCatching { onNameKnown(handle.name() ?: "torrent") }
+                        }
+                    }
+                    AlertType.PIECE_FINISHED -> {
+                        val handle = (alert as? TorrentAlert<*>)?.handle()
+                        if (handle != null && handle == myHandle) {
+                            val progress = (handle.status().progress() * 100).toInt()
+                            onProgress(progress)
+                        }
+                    }
+                    AlertType.TORRENT_FINISHED -> {
+                        val handle = (alert as? TorrentAlert<*>)?.handle()
+                        if (handle != null && handle == myHandle) {
+                            onProgress(100)
+                            onDone()
+                            handles.remove(id)
+                            session.removeListener(this)
+                        }
+                    }
+                    AlertType.TORRENT_ERROR -> {
+                        val handle = (alert as? TorrentErrorAlert)?.handle()
+                        if (handle == null || handle == myHandle) {
+                            onError((alert as? TorrentErrorAlert)?.error()?.message() ?: "Torrent error")
+                            handles.remove(id)
+                            session.removeListener(this)
+                        }
+                    }
+                    else -> {}
+                }
+            }
         }
-        client.startAsync(Consumer { state ->
-            if (state.piecesRemaining == 0) onDone()
-        }, 1000)
-        return client
+        session.addListener(listener)
     }
 }

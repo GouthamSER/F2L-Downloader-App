@@ -2,12 +2,11 @@ package com.f2l.downloader
 
 import android.app.*
 import android.content.Intent
-import bt.runtime.BtClient
 import java.util.concurrent.ConcurrentHashMap
 
 class TorrentService : Service() {
     private lateinit var repo: DownloadRepository
-    private val clients = ConcurrentHashMap<Long, BtClient>()
+    private val active = ConcurrentHashMap.newKeySet<Long>()
 
     companion object {
         const val ACTION_START_MAGNET = "TORRENT_START_MAGNET"
@@ -34,65 +33,64 @@ class TorrentService : Service() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
-    private fun buildNotification(title: String, text: String): Notification =
+    private fun buildNotification(title: String, text: String, percent: Int? = null): Notification =
         androidx.core.app.NotificationCompat.Builder(this, "downloads")
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(openAppIntent())
-            .setOngoing(true)
+            .setOngoing(percent == null || percent < 100)
+            .apply { if (percent != null) setProgress(100, percent, false) }
             .build()
 
-    private fun notify(id: Long, title: String, text: String) {
+    private fun notify(id: Long, title: String, text: String, percent: Int? = null) {
         getSystemService(NotificationManager::class.java)
-            .notify(2000 + id.toInt(), buildNotification(title, text))
+            .notify(2000 + id.toInt(), buildNotification(title, text, percent))
     }
 
     private fun onFinishedOrError(id: Long) {
-        clients.remove(id)
-        if (clients.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+        active.remove(id)
+        if (active.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val id = intent?.getLongExtra("id", 0L) ?: return START_NOT_STICKY
         when (intent.action) {
             ACTION_START_MAGNET, ACTION_START_FILE -> {
+                active.add(id)
                 startForeground(1002, buildNotification("F2L Downloader", "Fetching torrent metadata…"))
 
-                val onFetched: (bt.metainfo.Torrent) -> Unit = { torrent ->
-                    persist(id) { it.copy(fileName = torrent.name ?: it.fileName) }
-                    notify(id, "Torrent", "Downloading ${torrent.name ?: "torrent"}…")
+                val onNameKnown: (String) -> Unit = { name -> persist(id) { it.copy(fileName = name) } }
+                val onProgress: (Int) -> Unit = { pct ->
+                    persist(id) { it.copy(status = DownloadItem.Status.DOWNLOADING, downloadedBytes = pct.toLong(), totalBytes = 100L) }
+                    notify(id, "Torrent", "$pct%", pct)
                 }
                 val onDone: () -> Unit = {
-                    persist(id) { it.copy(status = DownloadItem.Status.COMPLETED) }
-                    notify(id, "Torrent", "Download complete")
+                    persist(id) { it.copy(status = DownloadItem.Status.COMPLETED, downloadedBytes = 100L, totalBytes = 100L) }
+                    notify(id, "Torrent", "Download complete", 100)
                     onFinishedOrError(id)
                 }
-                val onError: (Throwable) -> Unit = { e ->
-                    persist(id) { it.copy(status = DownloadItem.Status.FAILED, error = e.message ?: "Torrent failed") }
+                val onError: (String) -> Unit = { message ->
+                    persist(id) { it.copy(status = DownloadItem.Status.FAILED, error = message) }
                     onFinishedOrError(id)
                 }
 
-                val client = if (intent.action == ACTION_START_MAGNET) {
+                if (intent.action == ACTION_START_MAGNET) {
                     val magnet = intent.getStringExtra("magnet") ?: return START_NOT_STICKY
-                    TorrentEngine.startMagnet(this, magnet, onFetched, onDone, onError)
+                    TorrentEngine.startMagnet(this, id, magnet, onNameKnown, onProgress, onDone, onError)
                 } else {
                     val bytes = intent.getByteArrayExtra("torrentBytes") ?: return START_NOT_STICKY
-                    TorrentEngine.startTorrentFile(this, bytes, onFetched, onDone, onError)
+                    TorrentEngine.startTorrentFile(this, id, bytes, onNameKnown, onProgress, onDone, onError)
                 }
-                clients[id] = client
             }
             ACTION_CANCEL -> {
-                clients.remove(id)?.let { runCatching { it.stop() } }
+                TorrentEngine.cancel(id)
+                active.remove(id)
+                if (active.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
             }
         }
         return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?) = null
-
-    override fun onDestroy() {
-        clients.values.forEach { runCatching { it.stop() } }
-        super.onDestroy()
-    }
 }
