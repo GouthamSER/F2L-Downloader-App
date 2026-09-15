@@ -1,4 +1,4 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 
 package com.f2l.downloader
 
@@ -17,6 +17,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -624,7 +625,7 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
                 }
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(item.fileName, color = TextPrimary, style = MaterialTheme.typography.titleSmall, maxLines = 1)
+                    Text(item.fileName, color = TextPrimary, style = MaterialTheme.typography.titleSmall, maxLines = 1, modifier = Modifier.basicMarquee())
                     Text(
                         if (item.isTorrent) "Torrent" else "${formatBytes(item.totalBytes)} · ${item.connections} threads",
                         color = TextSecondary, style = MaterialTheme.typography.labelSmall
@@ -713,7 +714,7 @@ private fun FilesScreen(items: List<DownloadItem>) {
                             Icon(fileTypeIcon(item.fileName), null, tint = GreenOk)
                             Spacer(Modifier.width(10.dp))
                             Column {
-                                Text(item.fileName, color = TextPrimary)
+                                Text(item.fileName, color = TextPrimary, maxLines = 1, modifier = Modifier.basicMarquee())
                                 Text(formatBytes(item.totalBytes), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                             }
                         }
@@ -1045,7 +1046,7 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
         containerColor = Color.Transparent,
         topBar = {
             TopAppBar(
-                title = { Text(item.fileName, maxLines = 1) },
+                title = { Text(item.fileName, maxLines = 1, modifier = Modifier.basicMarquee()) },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = TextPrimary),
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) } },
                 actions = { IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = RedErr) } }

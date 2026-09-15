@@ -60,6 +60,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             isTorrent = true, status = DownloadItem.Status.DOWNLOADING
         )
         setItems(listOf(item) + _items.value)
+        android.widget.Toast.makeText(getApplication(), "Torrent added", android.widget.Toast.LENGTH_SHORT).show()
         val i = Intent(getApplication(), TorrentService::class.java).apply {
             action = TorrentService.ACTION_START_MAGNET
             putExtra("id", id)
@@ -76,6 +77,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             isTorrent = true, status = DownloadItem.Status.DOWNLOADING
         )
         setItems(listOf(item) + _items.value)
+        android.widget.Toast.makeText(getApplication(), "Torrent added", android.widget.Toast.LENGTH_SHORT).show()
         val i = Intent(getApplication(), TorrentService::class.java).apply {
             action = TorrentService.ACTION_START_FILE
             putExtra("id", id)
