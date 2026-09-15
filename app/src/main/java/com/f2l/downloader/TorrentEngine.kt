@@ -48,7 +48,7 @@ object TorrentEngine {
     ) {
         Thread {
             try {
-                val data = session.fetchMagnet(magnetUri, 30)
+                val data = session.fetchMagnet(magnetUri, 30, saveDir(context))
                 if (data == null) {
                     onError("Could not fetch torrent metadata (timed out)")
                     return@Thread
@@ -130,7 +130,7 @@ object TorrentEngine {
                     AlertType.TORRENT_ERROR -> {
                         val handle = (alert as? TorrentErrorAlert)?.handle()
                         if (handle == null || handle == myHandle) {
-                            val message = (alert as? TorrentErrorAlert)?.error()?.message() ?: "Torrent error"
+                            val message = (alert as? TorrentErrorAlert)?.message() ?: "Torrent error"
                             onError(message)
                             handles.remove(id)
                             session.removeListener(this)
