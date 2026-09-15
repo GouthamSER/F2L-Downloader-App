@@ -77,6 +77,6 @@
     <string name="detail_error">Error</string>
     <string name="calculating">Calculating…</string>
 
-    <string name="dev_version">Version 3.0 · Liquid Glass</string>
+    <string name="dev_version">Version 3.0.1 · Liquid Glass</string>
     <string name="dev_developed_by">Developed by</string>
 </resources>
