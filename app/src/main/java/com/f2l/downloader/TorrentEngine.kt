@@ -32,6 +32,7 @@ object TorrentEngine {
     // relatively expensive, so it's created once, lazily, and kept running.
     private val session: SessionManager by lazy { SessionManager().also { it.start() } }
     private val handles = java.util.concurrent.ConcurrentHashMap<Long, TorrentHandle>()
+    private val stopFlags = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.atomic.AtomicBoolean>()
 
     fun saveDir(context: android.content.Context): File =
         File(context.getExternalFilesDir(null), "Torrents").apply { mkdirs() }
@@ -85,6 +86,7 @@ object TorrentEngine {
 
     /** Pauses/cancels a running torrent by the id it was started with. */
     fun cancel(id: Long) {
+        stopFlags.remove(id)?.set(true)
         handles.remove(id)?.let { runCatching { it.pause() } }
     }
 
@@ -95,6 +97,27 @@ object TorrentEngine {
         onError: (String) -> Unit
     ) {
         var myHandle: TorrentHandle? = null
+        var finished = false
+        val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
+        stopFlags[id] = stopped
+
+        fun startPolling(handle: TorrentHandle) {
+            Thread {
+                while (!finished && !stopped.get()) {
+                    try {
+                        val progress = (handle.status().progress() * 100).toInt()
+                        onProgress(progress)
+                        if (progress >= 100) {
+                            finished = true
+                            onDone()
+                            handles.remove(id)
+                            stopFlags.remove(id)
+                        }
+                    } catch (_: Exception) { /* handle may have been removed/invalidated */ }
+                    Thread.sleep(1000)
+                }
+            }.also { it.isDaemon = true; it.start() }
+        }
 
         val listener = object : AlertListener {
             override fun types(): IntArray? = null // all alert types; we filter in alert()
@@ -109,30 +132,32 @@ object TorrentEngine {
                             myHandle = handle
                             handles[id] = handle
                             handle.resume()
-                        }
-                    }
-                    AlertType.PIECE_FINISHED -> {
-                        val handle = (alert as? TorrentAlert<*>)?.handle()
-                        if (handle != null && handle == myHandle) {
-                            val progress = (handle.status().progress() * 100).toInt()
-                            onProgress(progress)
+                            // Poll status directly instead of relying on PIECE_FINISHED alerts —
+                            // those need an explicit alert-mask opt-in on the session's settings
+                            // to fire at all, and without it progress silently never updates even
+                            // though the download is actually happening ("stuck at peers" symptom).
+                            startPolling(handle)
                         }
                     }
                     AlertType.TORRENT_FINISHED -> {
                         val handle = (alert as? TorrentAlert<*>)?.handle()
-                        if (handle != null && handle == myHandle) {
+                        if (handle != null && handle == myHandle && !finished) {
+                            finished = true
                             onProgress(100)
                             onDone()
                             handles.remove(id)
+                            stopFlags.remove(id)
                             session.removeListener(this)
                         }
                     }
                     AlertType.TORRENT_ERROR -> {
                         val handle = (alert as? TorrentErrorAlert)?.handle()
-                        if (handle == null || handle == myHandle) {
+                        if ((handle == null || handle == myHandle) && !finished) {
+                            finished = true
                             val message = (alert as? TorrentErrorAlert)?.message() ?: "Torrent error"
                             onError(message)
                             handles.remove(id)
+                            stopFlags.remove(id)
                             session.removeListener(this)
                         }
                     }
