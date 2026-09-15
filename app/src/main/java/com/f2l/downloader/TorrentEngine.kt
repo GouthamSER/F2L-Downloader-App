@@ -56,7 +56,7 @@ object TorrentEngine {
                 }
                 val info = TorrentInfo(data)
                 onNameKnown(info.name() ?: "torrent")
-                attachListenerAndStart(id, onProgress, onDone, onError)
+                attachListenerAndStart(id, info, onProgress, onDone, onError)
                 session.download(info, saveDir(context))
             } catch (e: Exception) {
                 onError(e.message ?: "Magnet fetch failed")
@@ -77,7 +77,7 @@ object TorrentEngine {
         try {
             val info = TorrentInfo(torrentBytes)
             onNameKnown(info.name() ?: "torrent")
-            attachListenerAndStart(id, onProgress, onDone, onError)
+            attachListenerAndStart(id, info, onProgress, onDone, onError)
             session.download(info, saveDir(context))
         } catch (e: Exception) {
             onError(e.message ?: "Invalid torrent file")
@@ -92,10 +92,18 @@ object TorrentEngine {
 
     private fun attachListenerAndStart(
         id: Long,
+        info: TorrentInfo,
         onProgress: (percent: Int) -> Unit,
         onDone: () -> Unit,
         onError: (String) -> Unit
     ) {
+        // Every download's listener is registered on the SAME shared session and therefore
+        // receives EVERY torrent's alerts, not just its own — addListener() is global, not
+        // per-download. Matching "the first ADD_TORRENT I see" (the earlier approach) breaks
+        // as soon as two downloads start close together: listener B can latch onto torrent A's
+        // handle. Matching on the torrent's own info-hash (known before download() is even
+        // called) makes each listener only ever react to its own torrent, regardless of timing.
+        val expectedHash = info.infoHash()
         var myHandle: TorrentHandle? = null
         var finished = false
         val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -125,23 +133,23 @@ object TorrentEngine {
             override fun alert(alert: Alert<*>) {
                 when (alert.type()) {
                     AlertType.ADD_TORRENT -> {
-                        // The very next ADD_TORRENT after we call download() is ours —
-                        // lock onto it and make sure it actually starts.
                         if (myHandle == null) {
                             val handle = (alert as AddTorrentAlert).handle()
-                            myHandle = handle
-                            handles[id] = handle
-                            handle.resume()
-                            // Poll status directly instead of relying on PIECE_FINISHED alerts —
-                            // those need an explicit alert-mask opt-in on the session's settings
-                            // to fire at all, and without it progress silently never updates even
-                            // though the download is actually happening ("stuck at peers" symptom).
-                            startPolling(handle)
+                            if (handle.infoHash() == expectedHash) {
+                                myHandle = handle
+                                handles[id] = handle
+                                handle.resume()
+                                // Poll status directly instead of relying on PIECE_FINISHED alerts —
+                                // those need an explicit alert-mask opt-in on the session's settings
+                                // to fire at all, and without it progress silently never updates even
+                                // though the download is actually happening ("stuck at peers" symptom).
+                                startPolling(handle)
+                            }
                         }
                     }
                     AlertType.TORRENT_FINISHED -> {
                         val handle = (alert as? TorrentAlert<*>)?.handle()
-                        if (handle != null && handle == myHandle && !finished) {
+                        if (handle != null && handle.infoHash() == expectedHash && !finished) {
                             finished = true
                             onProgress(100)
                             onDone()
@@ -152,7 +160,7 @@ object TorrentEngine {
                     }
                     AlertType.TORRENT_ERROR -> {
                         val handle = (alert as? TorrentErrorAlert)?.handle()
-                        if ((handle == null || handle == myHandle) && !finished) {
+                        if (handle != null && handle.infoHash() == expectedHash && !finished) {
                             finished = true
                             val message = (alert as? TorrentErrorAlert)?.message() ?: "Torrent error"
                             onError(message)
