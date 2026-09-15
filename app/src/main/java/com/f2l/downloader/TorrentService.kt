@@ -11,7 +11,7 @@ class TorrentService : Service() {
     companion object {
         const val ACTION_START_MAGNET = "TORRENT_START_MAGNET"
         const val ACTION_START_FILE = "TORRENT_START_FILE"
-        const val ACTION_CANCEL = "TORRENT_CANCEL"
+        const val ACTION_REMOVE = "TORRENT_REMOVE"
     }
 
     override fun onCreate() {
@@ -61,12 +61,19 @@ class TorrentService : Service() {
                 startForeground(1002, buildNotification("F2L Downloader", "Fetching torrent metadata…"))
 
                 val onNameKnown: (String) -> Unit = { name -> persist(id) { it.copy(fileName = name) } }
-                val onProgress: (Int) -> Unit = { pct ->
-                    persist(id) { it.copy(status = DownloadItem.Status.DOWNLOADING, downloadedBytes = pct.toLong(), totalBytes = 100L) }
-                    notify(id, "Torrent", "$pct%", pct)
+                val onProgress: (TorrentEngine.Progress) -> Unit = { p ->
+                    persist(id) {
+                        it.copy(
+                            status = DownloadItem.Status.DOWNLOADING,
+                            downloadedBytes = p.percent.toLong(), totalBytes = 100L,
+                            speedBytesPerSec = p.speedBytesPerSec.toLong(),
+                            seeders = p.seeders, peers = p.peers
+                        )
+                    }
+                    notify(id, "Torrent", "${p.percent}% • ${p.seeders} seeders • ${p.peers} peers", p.percent)
                 }
                 val onDone: () -> Unit = {
-                    persist(id) { it.copy(status = DownloadItem.Status.COMPLETED, downloadedBytes = 100L, totalBytes = 100L) }
+                    persist(id) { it.copy(status = DownloadItem.Status.COMPLETED, downloadedBytes = 100L, totalBytes = 100L, speedBytesPerSec = 0) }
                     notify(id, "Torrent", "Download complete", 100)
                     onFinishedOrError(id)
                 }
@@ -83,8 +90,8 @@ class TorrentService : Service() {
                     TorrentEngine.startTorrentFile(this, id, bytes, onNameKnown, onProgress, onDone, onError)
                 }
             }
-            ACTION_CANCEL -> {
-                TorrentEngine.cancel(id)
+            ACTION_REMOVE -> {
+                TorrentEngine.remove(id)
                 active.remove(id)
                 if (active.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
             }

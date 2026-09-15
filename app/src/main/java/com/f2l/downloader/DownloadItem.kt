@@ -13,7 +13,8 @@ data class DownloadItem(
     val error: String? = null,
     val connections: Int = 8,
     val isTorrent: Boolean = false,
-    val peers: Int = 0
+    val peers: Int = 0,
+    val seeders: Int = 0
 ) {
     enum class Status { QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELED }
 }

@@ -1,5 +1,6 @@
 package com.f2l.downloader
 
+import android.os.Environment
 import org.libtorrent4j.AlertListener
 import org.libtorrent4j.SessionManager
 import org.libtorrent4j.TorrentHandle
@@ -13,20 +14,14 @@ import java.io.File
 
 /**
  * BitTorrent engine backed by org.libtorrent4j — real native libtorrent bindings with
- * prebuilt Android .so binaries. Two earlier attempts hit real walls:
- *  - "bt" (bt-core): Guice-based, hits Class.getAnnotatedSuperclass() which Android's ART
- *    doesn't implement — not fixable from app code.
- *  - com.frostwire:jlibtorrent: same underlying library, but its distribution host
- *    (dl.frostwire.com/maven) is dead.
- * org.libtorrent4j is the same author's actively-maintained republish on real Maven Central,
- * but its actual method signatures have drifted from the old frostwire fork — notably there's
- * no download(String magnetUri, File) shortcut anymore. Magnet links go through
- * fetchMagnet() (blocking, hence run off the main thread) -> TorrentInfo -> download(TorrentInfo, File).
- *
- * Saves to the app's own external files directory (plain filesystem path), not the SAF
- * folder used for direct HTTP downloads — libtorrent writes real files, not SAF tree Uris.
+ * prebuilt Android .so binaries. (Earlier attempts: "bt"/bt-core hits a Guice/ART
+ * incompatibility not fixable from app code; com.frostwire:jlibtorrent's own maven host
+ * is dead. org.libtorrent4j is the same author's actively-maintained republish on real
+ * Maven Central.)
  */
 object TorrentEngine {
+
+    data class Progress(val percent: Int, val speedBytesPerSec: Int, val seeders: Int, val peers: Int)
 
     // One session for the whole app process — starting a session (DHT bootstrap etc.) is
     // relatively expensive, so it's created once, lazily, and kept running.
@@ -34,8 +29,25 @@ object TorrentEngine {
     private val handles = java.util.concurrent.ConcurrentHashMap<Long, TorrentHandle>()
     private val stopFlags = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.atomic.AtomicBoolean>()
 
-    fun saveDir(context: android.content.Context): File =
-        File(context.getExternalFilesDir(null), "Torrents").apply { mkdirs() }
+    /**
+     * Real public Downloads folder (same one other download managers use), not the app's
+     * own sandboxed folder — needs the "All files access" permission on Android 11+
+     * (MANAGE_EXTERNAL_STORAGE) since libtorrent writes to a plain filesystem path, not
+     * through SAF or MediaStore. Falls back to the app's own external files dir if that
+     * permission isn't granted, so torrents still work, just not in the shared folder.
+     */
+    fun saveDir(context: android.content.Context): File {
+        val hasAllFilesAccess = android.os.Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()
+        val hasLegacyWrite = android.os.Build.VERSION.SDK_INT < 30 // WRITE_EXTERNAL_STORAGE checked at request time
+        return if (hasAllFilesAccess || hasLegacyWrite) {
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).apply { mkdirs() }
+        } else {
+            File(context.getExternalFilesDir(null), "Torrents").apply { mkdirs() }
+        }
+    }
+
+    fun hasStorageAccess(): Boolean =
+        if (android.os.Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager() else true
 
     /** Starts a magnet-link download. fetchMagnet() blocks waiting on DHT, so this runs on its own thread. */
     fun startMagnet(
@@ -43,13 +55,14 @@ object TorrentEngine {
         id: Long,
         magnetUri: String,
         onNameKnown: (String) -> Unit,
-        onProgress: (percent: Int) -> Unit,
+        onProgress: (Progress) -> Unit,
         onDone: () -> Unit,
         onError: (String) -> Unit
     ) {
         Thread {
             try {
-                val data = session.fetchMagnet(magnetUri, 30, saveDir(context))
+                val dir = saveDir(context)
+                val data = session.fetchMagnet(magnetUri, 30, dir)
                 if (data == null) {
                     onError("Could not fetch torrent metadata (timed out)")
                     return@Thread
@@ -57,7 +70,7 @@ object TorrentEngine {
                 val info = TorrentInfo(data)
                 onNameKnown(info.name() ?: "torrent")
                 attachListenerAndStart(id, info, onProgress, onDone, onError)
-                session.download(info, saveDir(context))
+                session.download(info, dir)
             } catch (e: Exception) {
                 onError(e.message ?: "Magnet fetch failed")
             }
@@ -70,7 +83,7 @@ object TorrentEngine {
         id: Long,
         torrentBytes: ByteArray,
         onNameKnown: (String) -> Unit,
-        onProgress: (percent: Int) -> Unit,
+        onProgress: (Progress) -> Unit,
         onDone: () -> Unit,
         onError: (String) -> Unit
     ) {
@@ -84,8 +97,18 @@ object TorrentEngine {
         }
     }
 
-    /** Pauses/cancels a running torrent by the id it was started with. */
-    fun cancel(id: Long) {
+    /** Pauses without losing the torrent — resume(id) picks it back up. */
+    fun pause(id: Long) {
+        handles[id]?.let { runCatching { it.pause() } }
+    }
+
+    /** Resumes a paused torrent. */
+    fun resume(id: Long) {
+        handles[id]?.let { runCatching { it.resume() } }
+    }
+
+    /** Fully stops and forgets a torrent (used on delete). */
+    fun remove(id: Long) {
         stopFlags.remove(id)?.set(true)
         handles.remove(id)?.let { runCatching { it.pause() } }
     }
@@ -93,16 +116,15 @@ object TorrentEngine {
     private fun attachListenerAndStart(
         id: Long,
         info: TorrentInfo,
-        onProgress: (percent: Int) -> Unit,
+        onProgress: (Progress) -> Unit,
         onDone: () -> Unit,
         onError: (String) -> Unit
     ) {
         // Every download's listener is registered on the SAME shared session and therefore
         // receives EVERY torrent's alerts, not just its own — addListener() is global, not
-        // per-download. Matching "the first ADD_TORRENT I see" (the earlier approach) breaks
-        // as soon as two downloads start close together: listener B can latch onto torrent A's
-        // handle. Matching on the torrent's own info-hash (known before download() is even
-        // called) makes each listener only ever react to its own torrent, regardless of timing.
+        // per-download. Matching on the torrent's own info-hash (known before download() is
+        // even called) makes each listener only ever react to its own torrent, regardless of
+        // whether another download is starting around the same time.
         val expectedHash = info.infoHash()
         var myHandle: TorrentHandle? = null
         var finished = false
@@ -113,9 +135,10 @@ object TorrentEngine {
             Thread {
                 while (!finished && !stopped.get()) {
                     try {
-                        val progress = (handle.status().progress() * 100).toInt()
-                        onProgress(progress)
-                        if (progress >= 100) {
+                        val status = handle.status()
+                        val percent = (status.progress() * 100).toInt()
+                        onProgress(Progress(percent, status.downloadPayloadRate(), status.numSeeds(), status.numPeers()))
+                        if (percent >= 100) {
                             finished = true
                             onDone()
                             handles.remove(id)
@@ -139,10 +162,6 @@ object TorrentEngine {
                                 myHandle = handle
                                 handles[id] = handle
                                 handle.resume()
-                                // Poll status directly instead of relying on PIECE_FINISHED alerts —
-                                // those need an explicit alert-mask opt-in on the session's settings
-                                // to fire at all, and without it progress silently never updates even
-                                // though the download is actually happening ("stuck at peers" symptom).
                                 startPolling(handle)
                             }
                         }
@@ -151,7 +170,7 @@ object TorrentEngine {
                         val handle = (alert as? TorrentAlert<*>)?.handle()
                         if (handle != null && handle.infoHash() == expectedHash && !finished) {
                             finished = true
-                            onProgress(100)
+                            onProgress(Progress(100, 0, 0, 0))
                             onDone()
                             handles.remove(id)
                             stopFlags.remove(id)

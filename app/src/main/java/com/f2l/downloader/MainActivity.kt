@@ -637,7 +637,7 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
-                    if (item.isTorrent) "${item.downloadedBytes}% via peers" else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}",
+                    if (item.isTorrent) "${item.downloadedBytes}% · ${item.seeders}S/${item.peers}P" else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}",
                     color = TextSecondary, style = MaterialTheme.typography.labelSmall
                 )
                 Text(statusLabel, color = statusColor, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
@@ -661,11 +661,9 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             }
             when (item.status) {
                 DownloadItem.Status.DOWNLOADING -> {
-                    if (!item.isTorrent) {
-                        Spacer(Modifier.height(8.dp))
-                        OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
-                            Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
-                        }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
                     }
                 }
                 DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> {
@@ -907,6 +905,33 @@ private fun SettingsScreen(vm: MainViewModel) {
         }
 
         Spacer(Modifier.height(20.dp))
+        SettingsSection(title = "Torrent & magnet") {
+            var storageGranted by remember { mutableStateOf(TorrentEngine.hasStorageAccess()) }
+            val legacyStoragePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+                storageGranted = TorrentEngine.hasStorageAccess()
+            }
+            SettingsRow(
+                icon = Icons.Default.Folder,
+                title = "Storage access",
+                subtitle = if (storageGranted) "Granted — torrents save to Downloads" else "Not granted — torrents save to F2L's own folder",
+                onClick = {
+                    if (android.os.Build.VERSION.SDK_INT >= 30) {
+                        context.startActivity(
+                            Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
+                                .setData(Uri.parse("package:${context.packageName}"))
+                        )
+                    } else {
+                        legacyStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    }
+                }
+            )
+            Text(
+                "Without this, magnet/torrent downloads still work but save to F2L's own app folder instead of the shared Downloads folder — libtorrent needs real filesystem access, not the folder picker used for direct links.",
+                color = TextSecondary, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+
+        Spacer(Modifier.height(20.dp))
         SettingsSection(title = stringResource(R.string.section_general)) {
             Box {
                 SettingsRow(icon = Icons.Default.Palette, title = stringResource(R.string.row_appearance), subtitle = if (themeMode == "light") stringResource(R.string.theme_light) else stringResource(R.string.theme_dark), onClick = { appearanceMenu = true })
@@ -1054,9 +1079,13 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
                         stringResource(R.string.detail_downloaded),
                         if (item.isTorrent) "${item.downloadedBytes}% downloaded via peers (BitTorrent)" else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
                     )
-                    if (!item.isTorrent && item.status == DownloadItem.Status.DOWNLOADING) {
+                    if (item.status == DownloadItem.Status.DOWNLOADING) {
                         DetailRow(stringResource(R.string.detail_speed), if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else stringResource(R.string.calculating))
-                        DetailRow(stringResource(R.string.detail_eta), if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else stringResource(R.string.calculating))
+                        if (item.isTorrent) {
+                            DetailRow("Seeders / Peers", "${item.seeders} seeders · ${item.peers} peers")
+                        } else {
+                            DetailRow(stringResource(R.string.detail_eta), if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else stringResource(R.string.calculating))
+                        }
                     }
                     if (!item.isTorrent) DetailRow(stringResource(R.string.detail_connections), "${item.connections} threads")
                     DetailRow(stringResource(R.string.detail_filename), item.fileName)
@@ -1068,7 +1097,7 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
 
             Spacer(Modifier.height(24.dp))
             when (item.status) {
-                DownloadItem.Status.DOWNLOADING -> if (!item.isTorrent) OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
+                DownloadItem.Status.DOWNLOADING -> OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
                 }
                 DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> Button(

@@ -86,8 +86,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun start(item: DownloadItem) {
         if (item.isTorrent) {
-            // torrents don't carry a magnet uri round-trip here; re-adding an already-fetched
-            // torrent from scratch isn't supported yet — resume/pause for torrents is TODO.
+            TorrentEngine.resume(item.id)
+            update(item.id) { it.copy(status = DownloadItem.Status.DOWNLOADING, error = null) }
             return
         }
         if (settings.wifiOnly && !isOnWifi()) {
@@ -110,11 +110,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun pause(item: DownloadItem) {
         if (item.isTorrent) {
-            getApplication<Application>().startService(
-                Intent(getApplication(), TorrentService::class.java)
-                    .setAction(TorrentService.ACTION_CANCEL)
-                    .putExtra("id", item.id)
-            )
+            TorrentEngine.pause(item.id)
             update(item.id) { it.copy(status = DownloadItem.Status.PAUSED) }
             return
         }
@@ -130,7 +126,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (item.isTorrent) {
             getApplication<Application>().startService(
                 Intent(getApplication(), TorrentService::class.java)
-                    .setAction(TorrentService.ACTION_CANCEL)
+                    .setAction(TorrentService.ACTION_REMOVE)
                     .putExtra("id", item.id)
             )
             runCatching { File(item.folderUri, item.fileName).delete() }
