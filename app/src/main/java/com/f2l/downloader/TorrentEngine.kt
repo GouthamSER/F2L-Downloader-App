@@ -23,9 +23,16 @@ object TorrentEngine {
 
     data class Progress(val percent: Int, val speedBytesPerSec: Int, val seeders: Int, val peers: Int)
 
-    // One session for the whole app process — starting a session (DHT bootstrap etc.) is
-    // relatively expensive, so it's created once, lazily, and kept running.
-    private val session: SessionManager by lazy { SessionManager().also { it.start() } }
+    // First-ever fetchMagnet on a cold session races DHT bootstrap (which can genuinely take
+    // 30-60s to find any nodes) — giving it a head start here means the timeout inside
+    // fetchMagnet is spent finding peers, not still waiting for DHT to wake up.
+    private val sessionStartedAt = java.util.concurrent.atomic.AtomicLong(0)
+    private val session: SessionManager by lazy {
+        SessionManager().also {
+            it.start()
+            sessionStartedAt.set(System.currentTimeMillis())
+        }
+    }
     private val handles = java.util.concurrent.ConcurrentHashMap<Long, TorrentHandle>()
     private val stopFlags = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.atomic.AtomicBoolean>()
 
@@ -61,18 +68,29 @@ object TorrentEngine {
     ) {
         Thread {
             try {
+                // Force session init now (starts DHT bootstrap) before we potentially wait on it.
+                val startedAt = session.let { sessionStartedAt.get() }
+                val dhtWarmupMs = 10_000L
+                val elapsed = System.currentTimeMillis() - startedAt
+                if (elapsed in 0 until dhtWarmupMs) {
+                    Thread.sleep(dhtWarmupMs - elapsed)
+                }
+
                 val dir = saveDir(context)
-                val data = session.fetchMagnet(magnetUri, 30, dir)
+                val data = session.fetchMagnet(magnetUri, 60, dir)
                 if (data == null) {
-                    onError("Could not fetch torrent metadata (timed out)")
+                    onError("Could not fetch torrent metadata — no peers/DHT nodes responded within 60s. Could be a dead swarm, or DHT (UDP) traffic is being blocked on this network.")
                     return@Thread
                 }
                 val info = TorrentInfo(data)
                 onNameKnown(info.name() ?: "torrent")
                 attachListenerAndStart(id, info, onProgress, onDone, onError)
                 session.download(info, dir)
-            } catch (e: Exception) {
-                onError(e.message ?: "Magnet fetch failed")
+            } catch (e: Throwable) {
+                // Throwable, not Exception: a native/JNI-level failure can surface as an Error
+                // subtype that a plain "catch (e: Exception)" silently misses entirely, leaving
+                // the download stuck on "fetching metadata" forever with no error ever shown.
+                onError(e.message ?: "Magnet fetch failed (${e.javaClass.simpleName})")
             }
         }.start()
     }
@@ -92,8 +110,8 @@ object TorrentEngine {
             onNameKnown(info.name() ?: "torrent")
             attachListenerAndStart(id, info, onProgress, onDone, onError)
             session.download(info, saveDir(context))
-        } catch (e: Exception) {
-            onError(e.message ?: "Invalid torrent file")
+        } catch (e: Throwable) {
+            onError(e.message ?: "Invalid torrent file (${e.javaClass.simpleName})")
         }
     }
 

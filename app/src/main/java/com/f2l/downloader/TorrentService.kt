@@ -58,7 +58,7 @@ class TorrentService : Service() {
         when (intent.action) {
             ACTION_START_MAGNET, ACTION_START_FILE -> {
                 active.add(id)
-                startForeground(1002, buildNotification("F2L Downloader", "Fetching torrent metadata…"))
+                startForeground(1002, buildNotification("F2L Downloader", "Fetching torrent metadata… (can take up to a minute)"))
 
                 val onNameKnown: (String) -> Unit = { name -> persist(id) { it.copy(fileName = name) } }
                 val onProgress: (TorrentEngine.Progress) -> Unit = { p ->
@@ -89,6 +89,20 @@ class TorrentService : Service() {
                     val bytes = intent.getByteArrayExtra("torrentBytes") ?: return START_NOT_STICKY
                     TorrentEngine.startTorrentFile(this, id, bytes, onNameKnown, onProgress, onDone, onError)
                 }
+
+                // Watchdog: if metadata fetch is still stuck 100s from now (past even the 60s
+                // fetchMagnet timeout plus DHT warmup), something hung without ever throwing —
+                // fail it visibly instead of leaving "Fetching torrent metadata…" forever with
+                // no feedback at all.
+                Thread {
+                    Thread.sleep(100_000)
+                    if (active.contains(id)) {
+                        val current = repo.load().find { it.id == id }
+                        if (current != null && current.status != DownloadItem.Status.COMPLETED && current.status != DownloadItem.Status.FAILED) {
+                            onError("Timed out waiting for torrent metadata. This usually means DHT (UDP) traffic is blocked on this network, or the swarm has no reachable peers.")
+                        }
+                    }
+                }.also { it.isDaemon = true; it.start() }
             }
             ACTION_REMOVE -> {
                 TorrentEngine.remove(id)
