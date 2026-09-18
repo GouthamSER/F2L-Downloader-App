@@ -49,15 +49,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Magnet links and .torrent files run through TorrentService (pure-Java "bt" library, no
-     *  external binary). They save to the app's own external files dir, not the SAF folder used
-     *  for direct HTTP links — bt writes plain filesystem paths, not SAF tree Uris. */
+    /** Magnet links and .torrent files run through TorrentService with org.libtorrent4j native engine. */
     fun addMagnet(magnetUri: String) {
         val id = System.currentTimeMillis()
+        val displayName = TorrentEngine.extractDisplayName(magnetUri) ?: "Magnet Download"
         val item = DownloadItem(
-            id = id, url = magnetUri, fileName = "Fetching torrent metadata…",
+            id = id,
+            url = magnetUri,
+            fileName = displayName,
             folderUri = TorrentEngine.saveDir(getApplication()).absolutePath,
-            isTorrent = true, status = DownloadItem.Status.DOWNLOADING
+            isTorrent = true,
+            status = DownloadItem.Status.DOWNLOADING
         )
         setItems(listOf(item) + _items.value)
         android.widget.Toast.makeText(getApplication(), "Torrent added", android.widget.Toast.LENGTH_SHORT).show()
@@ -71,10 +73,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addTorrentFile(bytes: ByteArray, displayName: String) {
         val id = System.currentTimeMillis()
+        TorrentEngine.saveTorrentFile(getApplication(), id, bytes)
+        val resolvedName = TorrentEngine.getTorrentName(bytes) ?: displayName
         val item = DownloadItem(
-            id = id, url = "torrent:$displayName", fileName = displayName,
+            id = id,
+            url = "torrent:$resolvedName",
+            fileName = resolvedName,
             folderUri = TorrentEngine.saveDir(getApplication()).absolutePath,
-            isTorrent = true, status = DownloadItem.Status.DOWNLOADING
+            isTorrent = true,
+            status = DownloadItem.Status.DOWNLOADING
         )
         setItems(listOf(item) + _items.value)
         android.widget.Toast.makeText(getApplication(), "Torrent added", android.widget.Toast.LENGTH_SHORT).show()
@@ -88,8 +95,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun start(item: DownloadItem) {
         if (item.isTorrent) {
-            TorrentEngine.resume(item.id)
             update(item.id) { it.copy(status = DownloadItem.Status.DOWNLOADING, error = null) }
+            val i = Intent(getApplication(), TorrentService::class.java).apply {
+                action = TorrentService.ACTION_RESUME
+                putExtra("id", item.id)
+            }
+            ContextCompat.startForegroundService(getApplication(), i)
             return
         }
         if (settings.wifiOnly && !isOnWifi()) {
@@ -112,8 +123,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun pause(item: DownloadItem) {
         if (item.isTorrent) {
-            TorrentEngine.pause(item.id)
-            update(item.id) { it.copy(status = DownloadItem.Status.PAUSED) }
+            update(item.id) { it.copy(status = DownloadItem.Status.PAUSED, speedBytesPerSec = 0) }
+            val i = Intent(getApplication(), TorrentService::class.java).apply {
+                action = TorrentService.ACTION_PAUSE
+                putExtra("id", item.id)
+            }
+            getApplication<Application>().startService(i)
             return
         }
         getApplication<Application>().startService(
@@ -132,6 +147,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     .putExtra("id", item.id)
             )
             runCatching { File(item.folderUri, item.fileName).delete() }
+            runCatching { File(getApplication<Application>().filesDir, "torrents/${item.id}.torrent").delete() }
             setItems(_items.value.filterNot { it.id == item.id })
             return
         }
@@ -148,13 +164,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun update(id: Long, transform: (DownloadItem) -> DownloadItem) =
         setItems(_items.value.map { if (it.id == id) transform(it) else it })
 
-    fun applyProgress(id: Long, downloaded: Long, total: Long, speed: Long) {
-        update(id) { it.copy(
-            downloadedBytes = downloaded,
-            totalBytes = if (total > 0) total else it.totalBytes,
-            speedBytesPerSec = speed,
-            etaSeconds = if (total > downloaded && speed > 0) (total - downloaded) / speed else -1
-        ) }
+    fun applyProgress(
+        id: Long,
+        downloaded: Long,
+        total: Long,
+        speed: Long,
+        seeders: Int = 0,
+        peers: Int = 0,
+        resolvedName: String? = null
+    ) {
+        update(id) {
+            it.copy(
+                fileName = resolvedName ?: it.fileName,
+                downloadedBytes = downloaded,
+                totalBytes = if (total > 0) total else it.totalBytes,
+                speedBytesPerSec = speed,
+                seeders = if (seeders > 0) seeders else it.seeders,
+                peers = if (peers > 0) peers else it.peers,
+                etaSeconds = if (total > downloaded && speed > 0) (total - downloaded) / speed else -1
+            )
+        }
     }
 
     private fun isOnWifi(): Boolean {

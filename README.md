@@ -4,11 +4,12 @@
 
 An Android download manager built with Kotlin + Jetpack Compose. Multi-threaded direct-link downloads, a Liquid Glass UI, and no social-media video extraction.
 
-Version **3.0 · Liquid Glass**
+Version **3.1.0 · Minor Upgrade With Torrents**
 
 ## Features
 
 **Downloads**
+- High-performance BitTorrent and magnet link downloading with live peer discovery, DHT, and public tracker acceleration
 - Multi-threaded segmented downloads (2–16 connections) for servers that support HTTP Range requests, automatic fallback to a single connection otherwise
 - Pause / resume / retry, with automatic retry-on-failure (configurable attempt count)
 - Real-time progress, speed, and ETA — in-app and in the persistent notification (with a real progress bar)

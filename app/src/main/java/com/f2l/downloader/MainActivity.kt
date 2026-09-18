@@ -151,20 +151,34 @@ class MainActivity : ComponentActivity() {
             when (intent.action) {
                 DownloadService.ACTION_PROGRESS -> {
                     if (intent.getBooleanExtra("paused", false)) {
-                        vm.update(id) { it.copy(status = DownloadItem.Status.PAUSED) }
+                        vm.update(id) { it.copy(status = DownloadItem.Status.PAUSED, speedBytesPerSec = 0) }
                     } else {
+                        val seeders = intent.getIntExtra("seeders", 0)
+                        val peers = intent.getIntExtra("peers", 0)
+                        val name = intent.getStringExtra("name")
                         vm.applyProgress(
-                            id,
-                            intent.getLongExtra("downloaded", 0),
-                            intent.getLongExtra("total", -1),
-                            intent.getLongExtra("speed", 0)
+                            id = id,
+                            downloaded = intent.getLongExtra("downloaded", 0),
+                            total = intent.getLongExtra("total", -1),
+                            speed = intent.getLongExtra("speed", 0),
+                            seeders = seeders,
+                            peers = peers,
+                            resolvedName = name
                         )
+                        vm.update(id) { it.copy(status = DownloadItem.Status.DOWNLOADING, error = null) }
                     }
                 }
                 DownloadService.ACTION_FINISHED ->
-                    vm.update(id) { it.copy(status = DownloadItem.Status.COMPLETED, downloadedBytes = it.totalBytes.coerceAtLeast(it.downloadedBytes), speedBytesPerSec = 0, etaSeconds = -1) }
+                    vm.update(id) {
+                        it.copy(
+                            status = DownloadItem.Status.COMPLETED,
+                            downloadedBytes = if (it.totalBytes > 0) it.totalBytes else it.downloadedBytes,
+                            speedBytesPerSec = 0,
+                            etaSeconds = -1
+                        )
+                    }
                 DownloadService.ACTION_FAILED ->
-                    vm.update(id) { it.copy(status = DownloadItem.Status.FAILED, error = intent.getStringExtra("error")) }
+                    vm.update(id) { it.copy(status = DownloadItem.Status.FAILED, error = intent.getStringExtra("error"), speedBytesPerSec = 0) }
             }
         }
     }
@@ -430,8 +444,14 @@ private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
 private fun resolveContentUri(context: android.content.Context, item: DownloadItem): Uri? {
     return if (item.isTorrent) {
         val file = java.io.File(item.folderUri, item.fileName)
-        if (!file.exists()) null
-        else androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        if (!file.exists()) {
+            val fallback = java.io.File(TorrentEngine.saveDir(context), item.fileName)
+            if (fallback.exists()) {
+                androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", fallback)
+            } else null
+        } else {
+            androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        }
     } else {
         val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(item.folderUri))
         tree?.findFile(item.fileName)?.takeIf { it.exists() }?.uri
@@ -627,7 +647,10 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
                 Column(Modifier.weight(1f)) {
                     Text(item.fileName, color = TextPrimary, style = MaterialTheme.typography.titleSmall, maxLines = 1, modifier = Modifier.basicMarquee())
                     Text(
-                        if (item.isTorrent) "Torrent" else "${formatBytes(item.totalBytes)} · ${item.connections} threads",
+                        if (item.isTorrent) {
+                            if (item.totalBytes > 0) "${formatBytes(item.totalBytes)} · BitTorrent"
+                            else "BitTorrent"
+                        } else "${formatBytes(item.totalBytes)} · ${item.connections} threads",
                         color = TextSecondary, style = MaterialTheme.typography.labelSmall
                     )
                 }
@@ -638,7 +661,16 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
-                    if (item.isTorrent) "${item.downloadedBytes}% · ${item.seeders}S/${item.peers}P" else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}",
+                    if (item.isTorrent) {
+                        if (item.totalBytes > 0) {
+                            val pct = ((item.downloadedBytes.toDouble() / item.totalBytes) * 100).toInt().coerceIn(0, 100)
+                            "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)} ($pct%) · ${item.seeders}S/${item.peers}P"
+                        } else if (item.peers > 0 || item.seeders > 0) {
+                            "Finding metadata… · ${item.seeders}S/${item.peers}P"
+                        } else {
+                            "Connecting to swarm…"
+                        }
+                    } else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}",
                     color = TextSecondary, style = MaterialTheme.typography.labelSmall
                 )
                 Text(statusLabel, color = statusColor, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
@@ -753,8 +785,13 @@ private fun AddDownloadScreen(
     val torrentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) {
             val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            val name = uri.lastPathSegment?.substringAfterLast('/') ?: "torrent-${System.currentTimeMillis()}.torrent"
-            if (bytes != null) { vm.addTorrentFile(bytes, name); onBack() }
+            if (bytes != null && bytes.isNotEmpty()) {
+                val parsedName = TorrentEngine.getTorrentName(bytes)
+                val fallbackName = uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+                    ?: "torrent-${System.currentTimeMillis()}.torrent"
+                vm.addTorrentFile(bytes, parsedName ?: fallbackName)
+                onBack()
+            }
         }
     }
 
@@ -788,7 +825,7 @@ private fun AddDownloadScreen(
             }
             Spacer(Modifier.height(16.dp))
 
-            OutlinedButton(onClick = { torrentPicker.launch(arrayOf("application/x-bittorrent")) }, modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = { torrentPicker.launch(arrayOf("application/x-bittorrent", "application/octet-stream", "*/*")) }, modifier = Modifier.fillMaxWidth()) {
                 Icon(Icons.Default.FolderZip, null, tint = TextPrimary)
                 Spacer(Modifier.width(8.dp))
                 Text("Or pick a .torrent file", color = TextPrimary)
@@ -1078,12 +1115,24 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
                 Column(Modifier.padding(horizontal = 16.dp)) {
                     DetailRow(
                         stringResource(R.string.detail_downloaded),
-                        if (item.isTorrent) "${item.downloadedBytes}% downloaded via peers (BitTorrent)" else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
+                        if (item.isTorrent) {
+                            if (item.totalBytes > 0) {
+                                val pct = ((item.downloadedBytes.toDouble() / item.totalBytes) * 100).toInt().coerceIn(0, 100)
+                                "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)} ($pct%)"
+                            } else if (item.peers > 0 || item.seeders > 0) {
+                                "Finding metadata… (${item.seeders} seeds, ${item.peers} peers)"
+                            } else {
+                                "Connecting to BitTorrent swarm…"
+                            }
+                        } else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
                     )
                     if (item.status == DownloadItem.Status.DOWNLOADING) {
                         DetailRow(stringResource(R.string.detail_speed), if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else stringResource(R.string.calculating))
                         if (item.isTorrent) {
                             DetailRow("Seeders / Peers", "${item.seeders} seeders · ${item.peers} peers")
+                            if (item.etaSeconds > 0) {
+                                DetailRow(stringResource(R.string.detail_eta), formatDuration(item.etaSeconds))
+                            }
                         } else {
                             DetailRow(stringResource(R.string.detail_eta), if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else stringResource(R.string.calculating))
                         }

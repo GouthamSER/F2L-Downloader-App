@@ -1,51 +1,131 @@
 package com.f2l.downloader
 
+import android.content.Context
+import android.os.Build
 import android.os.Environment
 import org.libtorrent4j.AlertListener
 import org.libtorrent4j.SessionManager
+import org.libtorrent4j.Sha1Hash
 import org.libtorrent4j.TorrentHandle
 import org.libtorrent4j.TorrentInfo
+import org.libtorrent4j.TorrentStatus
 import org.libtorrent4j.alerts.AddTorrentAlert
 import org.libtorrent4j.alerts.Alert
 import org.libtorrent4j.alerts.AlertType
-import org.libtorrent4j.alerts.TorrentAlert
+import org.libtorrent4j.alerts.MetadataReceivedAlert
 import org.libtorrent4j.alerts.TorrentErrorAlert
+import org.libtorrent4j.alerts.TorrentFinishedAlert
+import org.libtorrent4j.swig.error_code
+import org.libtorrent4j.swig.libtorrent
+import org.libtorrent4j.swig.torrent_flags_t
 import java.io.File
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * BitTorrent engine backed by org.libtorrent4j — real native libtorrent bindings with
- * prebuilt Android .so binaries. (Earlier attempts: "bt"/bt-core hits a Guice/ART
- * incompatibility not fixable from app code; com.frostwire:jlibtorrent's own maven host
- * is dead. org.libtorrent4j is the same author's actively-maintained republish on real
- * Maven Central.)
+ * High-performance BitTorrent & magnet engine backed by org.libtorrent4j.
+ * Uses native non-blocking libtorrent sessions with peer discovery, metadata fetching,
+ * tracker injection, and live metric reporting.
  */
 object TorrentEngine {
 
-    data class Progress(val percent: Int, val speedBytesPerSec: Int, val seeders: Int, val peers: Int)
+    data class Progress(
+        val percent: Int,
+        val speedBytesPerSec: Long,
+        val seeders: Int,
+        val peers: Int,
+        val downloadedBytes: Long = 0L,
+        val totalBytes: Long = -1L,
+        val hasMetadata: Boolean = false,
+        val resolvedName: String? = null
+    )
 
-    // First-ever fetchMagnet on a cold session races DHT bootstrap (which can genuinely take
-    // 30-60s to find any nodes) — giving it a head start here means the timeout inside
-    // fetchMagnet is spent finding peers, not still waiting for DHT to wake up.
-    private val sessionStartedAt = java.util.concurrent.atomic.AtomicLong(0)
     private val session: SessionManager by lazy {
-        SessionManager().also {
-            it.start()
-            sessionStartedAt.set(System.currentTimeMillis())
+        SessionManager().also { sm ->
+            sm.start()
+            runCatching { sm.dht(true) }
         }
     }
-    private val handles = java.util.concurrent.ConcurrentHashMap<Long, TorrentHandle>()
-    private val stopFlags = java.util.concurrent.ConcurrentHashMap<Long, java.util.concurrent.atomic.AtomicBoolean>()
+
+    private val handles = ConcurrentHashMap<Long, TorrentHandle>()
+    private val stopFlags = ConcurrentHashMap<Long, AtomicBoolean>()
+
+    // Tier 1 reliable public trackers to accelerate swarm discovery
+    val PUBLIC_TRACKERS = listOf(
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://explodie.org:6969/announce",
+        "udp://tracker.openbittorrent.com:6969/announce",
+        "udp://tracker.moeking.me:6969/announce",
+        "http://tracker.openbittorrent.com:80/announce"
+    )
 
     /**
-     * Real public Downloads folder (same one other download managers use), not the app's
-     * own sandboxed folder — needs the "All files access" permission on Android 11+
-     * (MANAGE_EXTERNAL_STORAGE) since libtorrent writes to a plain filesystem path, not
-     * through SAF or MediaStore. Falls back to the app's own external files dir if that
-     * permission isn't granted, so torrents still work, just not in the shared folder.
+     * Appends public trackers to a magnet URI if not already present.
      */
-    fun saveDir(context: android.content.Context): File {
-        val hasAllFilesAccess = android.os.Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()
-        val hasLegacyWrite = android.os.Build.VERSION.SDK_INT < 30 // WRITE_EXTERNAL_STORAGE checked at request time
+    fun enrichMagnetUri(magnetUri: String): String {
+        val sb = StringBuilder(magnetUri)
+        for (tr in PUBLIC_TRACKERS) {
+            val encoded = try { URLEncoder.encode(tr, "UTF-8") } catch (_: Exception) { tr }
+            if (!magnetUri.contains(encoded) && !magnetUri.contains(tr)) {
+                sb.append("&tr=").append(encoded)
+            }
+        }
+        return sb.toString()
+    }
+
+    /**
+     * Extracts display name (dn parameter) from a magnet URI if present.
+     */
+    fun extractDisplayName(magnetUri: String): String? {
+        return try {
+            val match = Regex("""[?&]dn=([^&]+)""").find(magnetUri)
+            match?.groupValues?.get(1)?.let { URLDecoder.decode(it, "UTF-8") }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Extracts the torrent info-hash from a magnet URI.
+     */
+    fun parseInfoHash(magnetUri: String): String? {
+        return try {
+            val ec = error_code()
+            val p = libtorrent.parse_magnet_uri(magnetUri, ec)
+            if (ec.value() == 0) {
+                p.info_hashes.best.to_hex()
+            } else {
+                val match = Regex("""xt=urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})""", RegexOption.IGNORE_CASE).find(magnetUri)
+                match?.groupValues?.get(1)
+            }
+        } catch (_: Throwable) {
+            val match = Regex("""xt=urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})""", RegexOption.IGNORE_CASE).find(magnetUri)
+            match?.groupValues?.get(1)
+        }
+    }
+
+    /**
+     * Inspects a raw .torrent byte array and returns its internal name.
+     */
+    fun getTorrentName(bytes: ByteArray): String? {
+        return try {
+            val info = TorrentInfo(bytes)
+            info.name()?.takeIf { it.isNotBlank() }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Real public Downloads folder (if storage permission granted) or app sandboxed Torrents folder.
+     */
+    fun saveDir(context: Context): File {
+        val hasAllFilesAccess = Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()
+        val hasLegacyWrite = Build.VERSION.SDK_INT < 30
         return if (hasAllFilesAccess || hasLegacyWrite) {
             Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).apply { mkdirs() }
         } else {
@@ -54,11 +134,29 @@ object TorrentEngine {
     }
 
     fun hasStorageAccess(): Boolean =
-        if (android.os.Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager() else true
+        if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager() else true
 
-    /** Starts a magnet-link download. fetchMagnet() blocks waiting on DHT, so this runs on its own thread. */
+    fun torrentCacheDir(context: Context): File =
+        File(context.filesDir, "torrents").apply { mkdirs() }
+
+    fun saveTorrentFile(context: Context, id: Long, bytes: ByteArray): File {
+        val file = File(torrentCacheDir(context), "$id.torrent")
+        file.writeBytes(bytes)
+        return file
+    }
+
+    fun getSavedTorrentFile(context: Context, id: Long): File? {
+        val file = File(torrentCacheDir(context), "$id.torrent")
+        return if (file.exists() && file.length() > 0) file else null
+    }
+
+    /**
+     * Starts or resumes a magnet download.
+     * Uses libtorrent's native async magnet processing — starts searching peers immediately,
+     * pulls metadata via DHT and trackers, and streams file data without blocking.
+     */
     fun startMagnet(
-        context: android.content.Context,
+        context: Context,
         id: Long,
         magnetUri: String,
         onNameKnown: (String) -> Unit,
@@ -68,36 +166,39 @@ object TorrentEngine {
     ) {
         Thread {
             try {
-                // Force session init now (starts DHT bootstrap) before we potentially wait on it.
-                val startedAt = session.let { sessionStartedAt.get() }
-                val dhtWarmupMs = 10_000L
-                val elapsed = System.currentTimeMillis() - startedAt
-                if (elapsed in 0 until dhtWarmupMs) {
-                    Thread.sleep(dhtWarmupMs - elapsed)
+                val enriched = enrichMagnetUri(magnetUri.trim())
+                val initialName = extractDisplayName(enriched)
+                if (!initialName.isNullOrBlank()) {
+                    onNameKnown(initialName)
                 }
 
+                val targetHash = parseInfoHash(enriched)?.lowercase()
                 val dir = saveDir(context)
-                val data = session.fetchMagnet(magnetUri, 60, dir)
-                if (data == null) {
-                    onError("Could not fetch torrent metadata — no peers/DHT nodes responded within 60s. Could be a dead swarm, or DHT (UDP) traffic is being blocked on this network.")
-                    return@Thread
+
+                // Check if already in session (e.g. after pause/resume)
+                if (!targetHash.isNullOrBlank()) {
+                    val existing = findHandle(targetHash)
+                    if (existing != null && existing.isValid) {
+                        handles[id] = existing
+                        existing.resume()
+                        attachAlertsAndPolling(id, targetHash, existing, onNameKnown, onProgress, onDone, onError)
+                        return@Thread
+                    }
                 }
-                val info = TorrentInfo(data)
-                onNameKnown(info.name() ?: "torrent")
-                attachListenerAndStart(id, info, onProgress, onDone, onError)
-                session.download(info, dir)
+
+                attachAlertsAndPolling(id, targetHash, null, onNameKnown, onProgress, onDone, onError)
+                session.download(enriched, dir, torrent_flags_t())
             } catch (e: Throwable) {
-                // Throwable, not Exception: a native/JNI-level failure can surface as an Error
-                // subtype that a plain "catch (e: Exception)" silently misses entirely, leaving
-                // the download stuck on "fetching metadata" forever with no error ever shown.
-                onError(e.message ?: "Magnet fetch failed (${e.javaClass.simpleName})")
+                onError(e.message ?: "Failed to start magnet download (${e.javaClass.simpleName})")
             }
         }.start()
     }
 
-    /** Starts a download from a picked .torrent file's raw bytes. */
+    /**
+     * Starts or resumes a download from a .torrent file.
+     */
     fun startTorrentFile(
-        context: android.content.Context,
+        context: Context,
         id: Long,
         torrentBytes: ByteArray,
         onNameKnown: (String) -> Unit,
@@ -105,111 +206,236 @@ object TorrentEngine {
         onDone: () -> Unit,
         onError: (String) -> Unit
     ) {
-        try {
-            val info = TorrentInfo(torrentBytes)
-            onNameKnown(info.name() ?: "torrent")
-            attachListenerAndStart(id, info, onProgress, onDone, onError)
-            session.download(info, saveDir(context))
-        } catch (e: Throwable) {
-            onError(e.message ?: "Invalid torrent file (${e.javaClass.simpleName})")
-        }
+        Thread {
+            try {
+                // Save torrent bytes to internal cache for persistence across app restarts
+                saveTorrentFile(context, id, torrentBytes)
+
+                val info = TorrentInfo(torrentBytes)
+                val targetHash = info.infoHash().toHex().lowercase()
+                val dir = saveDir(context)
+                val name = info.name() ?: "torrent"
+                onNameKnown(name)
+
+                // Check if already in session
+                val existing = findHandle(targetHash)
+                if (existing != null && existing.isValid) {
+                    handles[id] = existing
+                    existing.resume()
+                    attachAlertsAndPolling(id, targetHash, existing, onNameKnown, onProgress, onDone, onError)
+                    return@Thread
+                }
+
+                attachAlertsAndPolling(id, targetHash, null, onNameKnown, onProgress, onDone, onError)
+                session.download(info, dir)
+            } catch (e: Throwable) {
+                onError(e.message ?: "Failed to start torrent file (${e.javaClass.simpleName})")
+            }
+        }.start()
     }
 
-    /** Pauses without losing the torrent — resume(id) picks it back up. */
+    fun hasHandle(id: Long): Boolean = handles[id]?.isValid == true
+
+    /**
+     * Pauses the torrent without removing it.
+     */
     fun pause(id: Long) {
+        stopFlags[id]?.set(true)
         handles[id]?.let { runCatching { it.pause() } }
     }
 
-    /** Resumes a paused torrent. */
+    /**
+     * Resumes a paused torrent.
+     */
     fun resume(id: Long) {
+        stopFlags[id]?.set(false)
         handles[id]?.let { runCatching { it.resume() } }
     }
 
-    /** Fully stops and forgets a torrent (used on delete). */
+    /**
+     * Completely removes a torrent from the session.
+     */
     fun remove(id: Long) {
         stopFlags.remove(id)?.set(true)
-        handles.remove(id)?.let { runCatching { it.pause() } }
+        val handle = handles.remove(id)
+        if (handle != null && handle.isValid) {
+            runCatching {
+                handle.pause()
+                session.remove(handle)
+            }
+        }
     }
 
-    private fun attachListenerAndStart(
+    private fun findHandle(hashHex: String): TorrentHandle? {
+        return try {
+            val sha1 = Sha1Hash.parseHex(hashHex)
+            session.find(sha1)?.takeIf { it.isValid }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun attachAlertsAndPolling(
         id: Long,
-        info: TorrentInfo,
+        targetHash: String?,
+        initialHandle: TorrentHandle?,
+        onNameKnown: (String) -> Unit,
         onProgress: (Progress) -> Unit,
         onDone: () -> Unit,
         onError: (String) -> Unit
     ) {
-        // Every download's listener is registered on the SAME shared session and therefore
-        // receives EVERY torrent's alerts, not just its own — addListener() is global, not
-        // per-download. Matching on the torrent's own info-hash (known before download() is
-        // even called) makes each listener only ever react to its own torrent, regardless of
-        // whether another download is starting around the same time.
-        val expectedHash = info.infoHash()
-        var myHandle: TorrentHandle? = null
-        var finished = false
-        val stopped = java.util.concurrent.atomic.AtomicBoolean(false)
+        var myHandle: TorrentHandle? = initialHandle
+        val finished = AtomicBoolean(false)
+        val stopped = AtomicBoolean(false)
         stopFlags[id] = stopped
 
         fun startPolling(handle: TorrentHandle) {
             Thread {
-                while (!finished && !stopped.get()) {
+                var lastResolvedName = ""
+                while (!finished.get() && !stopped.get()) {
                     try {
+                        if (!handle.isValid) break
                         val status = handle.status()
-                        val percent = (status.progress() * 100).toInt()
-                        onProgress(Progress(percent, status.downloadPayloadRate(), status.numSeeds(), status.numPeers()))
-                        if (percent >= 100) {
-                            finished = true
-                            onDone()
-                            handles.remove(id)
-                            stopFlags.remove(id)
+                        val progressFloat = status.progress()
+                        val percent = (progressFloat * 100).toInt().coerceIn(0, 100)
+                        val speed = status.downloadPayloadRate().toLong().coerceAtLeast(0L)
+                        val seeders = status.numSeeds().coerceAtLeast(0)
+                        val peers = status.numPeers().coerceAtLeast(0)
+                        val downloaded = status.totalDone().coerceAtLeast(0L)
+                        val total = if (status.totalWanted() > 0) status.totalWanted() else -1L
+                        val hasMeta = status.hasMetadata()
+
+                        var newName: String? = null
+                        if (hasMeta) {
+                            val tf = runCatching { handle.torrentFile() }.getOrNull()
+                            val n = tf?.name() ?: handle.name()
+                            if (!n.isNullOrBlank() && n != lastResolvedName && !n.startsWith("magnet:")) {
+                                lastResolvedName = n
+                                newName = n
+                                onNameKnown(n)
+                            }
                         }
-                    } catch (_: Exception) { /* handle may have been removed/invalidated */ }
-                    Thread.sleep(1000)
+
+                        onProgress(
+                            Progress(
+                                percent = percent,
+                                speedBytesPerSec = speed,
+                                seeders = seeders,
+                                peers = peers,
+                                downloadedBytes = downloaded,
+                                totalBytes = total,
+                                hasMetadata = hasMeta,
+                                resolvedName = newName
+                            )
+                        )
+
+                        val state = status.state()
+                        if (percent >= 100 || state == TorrentStatus.State.FINISHED || state == TorrentStatus.State.SEEDING) {
+                            if (finished.compareAndSet(false, true)) {
+                                onProgress(
+                                    Progress(
+                                        percent = 100,
+                                        speedBytesPerSec = 0L,
+                                        seeders = seeders,
+                                        peers = peers,
+                                        downloadedBytes = if (total > 0) total else downloaded,
+                                        totalBytes = total,
+                                        hasMetadata = true,
+                                        resolvedName = newName
+                                    )
+                                )
+                                onDone()
+                                handles.remove(id)
+                                stopFlags.remove(id)
+                            }
+                            break
+                        }
+                    } catch (_: Exception) {
+                        // Handle may become temporarily invalid during state transitions
+                    }
+                    try {
+                        Thread.sleep(1000)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
                 }
             }.also { it.isDaemon = true; it.start() }
         }
 
+        if (myHandle != null) {
+            handles[id] = myHandle
+            startPolling(myHandle)
+        }
+
         val listener = object : AlertListener {
-            override fun types(): IntArray? = null // all alert types; we filter in alert()
+            override fun types(): IntArray? = null
 
             override fun alert(alert: Alert<*>) {
+                if (finished.get() || stopped.get()) return
+
                 when (alert.type()) {
                     AlertType.ADD_TORRENT -> {
-                        if (myHandle == null) {
-                            val handle = (alert as AddTorrentAlert).handle()
-                            if (handle.infoHash() == expectedHash) {
-                                myHandle = handle
-                                handles[id] = handle
-                                handle.resume()
-                                startPolling(handle)
+                        val addAlert = alert as? AddTorrentAlert ?: return
+                        val handle = addAlert.handle()
+                        val handleHash = runCatching { handle.infoHash().toHex().lowercase() }.getOrNull()
+
+                        val matches = if (!targetHash.isNullOrBlank()) {
+                            targetHash.equals(handleHash, ignoreCase = true)
+                        } else {
+                            myHandle == null
+                        }
+
+                        if (matches && myHandle == null) {
+                            myHandle = handle
+                            handles[id] = handle
+                            handle.resume()
+                            startPolling(handle)
+                        }
+                    }
+                    AlertType.METADATA_RECEIVED -> {
+                        val metaAlert = alert as? MetadataReceivedAlert
+                        val handle = metaAlert?.handle()
+                        val handleHash = runCatching { handle?.infoHash()?.toHex()?.lowercase() }.getOrNull()
+                        if (handle != null && (targetHash.isNullOrBlank() || targetHash.equals(handleHash, ignoreCase = true))) {
+                            val tf = runCatching { handle.torrentFile() }.getOrNull()
+                            val name = tf?.name() ?: handle.name()
+                            if (!name.isNullOrBlank() && !name.startsWith("magnet:")) {
+                                onNameKnown(name)
                             }
                         }
                     }
                     AlertType.TORRENT_FINISHED -> {
-                        val handle = (alert as? TorrentAlert<*>)?.handle()
-                        if (handle != null && handle.infoHash() == expectedHash && !finished) {
-                            finished = true
-                            onProgress(Progress(100, 0, 0, 0))
-                            onDone()
-                            handles.remove(id)
-                            stopFlags.remove(id)
-                            session.removeListener(this)
+                        val torrentAlert = alert as? TorrentFinishedAlert
+                        val handle = torrentAlert?.handle()
+                        val handleHash = runCatching { handle?.infoHash()?.toHex()?.lowercase() }.getOrNull()
+                        if (handle != null && (targetHash.isNullOrBlank() || targetHash.equals(handleHash, ignoreCase = true))) {
+                            if (finished.compareAndSet(false, true)) {
+                                onDone()
+                                handles.remove(id)
+                                stopFlags.remove(id)
+                                session.removeListener(this)
+                            }
                         }
                     }
                     AlertType.TORRENT_ERROR -> {
-                        val handle = (alert as? TorrentErrorAlert)?.handle()
-                        if (handle != null && handle.infoHash() == expectedHash && !finished) {
-                            finished = true
-                            val message = (alert as? TorrentErrorAlert)?.message() ?: "Torrent error"
-                            onError(message)
-                            handles.remove(id)
-                            stopFlags.remove(id)
-                            session.removeListener(this)
+                        val errAlert = alert as? TorrentErrorAlert
+                        val handle = errAlert?.handle()
+                        val handleHash = runCatching { handle?.infoHash()?.toHex()?.lowercase() }.getOrNull()
+                        if (handle != null && (targetHash.isNullOrBlank() || targetHash.equals(handleHash, ignoreCase = true))) {
+                            if (finished.compareAndSet(false, true)) {
+                                val errorMsg = errAlert.message() ?: "Torrent error occurred"
+                                onError(errorMsg)
+                                handles.remove(id)
+                                stopFlags.remove(id)
+                                session.removeListener(this)
+                            }
                         }
                     }
                     else -> {}
                 }
             }
         }
+
         session.addListener(listener)
     }
 }

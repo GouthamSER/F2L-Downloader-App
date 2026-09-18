@@ -1,16 +1,29 @@
 package com.f2l.downloader
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import java.io.File
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 class TorrentService : Service() {
     private lateinit var repo: DownloadRepository
     private val active = ConcurrentHashMap.newKeySet<Long>()
+    private val itemNames = ConcurrentHashMap<Long, String>()
 
     companion object {
         const val ACTION_START_MAGNET = "TORRENT_START_MAGNET"
         const val ACTION_START_FILE = "TORRENT_START_FILE"
+        const val ACTION_PAUSE = "TORRENT_PAUSE"
+        const val ACTION_RESUME = "TORRENT_RESUME"
         const val ACTION_REMOVE = "TORRENT_REMOVE"
     }
 
@@ -34,13 +47,19 @@ class TorrentService : Service() {
     )
 
     private fun buildNotification(title: String, text: String, percent: Int? = null): Notification =
-        androidx.core.app.NotificationCompat.Builder(this, "downloads")
+        NotificationCompat.Builder(this, "downloads")
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(openAppIntent())
             .setOngoing(percent == null || percent < 100)
-            .apply { if (percent != null) setProgress(100, percent, false) }
+            .apply {
+                if (percent != null && percent in 0..100) {
+                    setProgress(100, percent, false)
+                } else if (percent == null) {
+                    setProgress(100, 0, true)
+                }
+            }
             .build()
 
     private fun notify(id: Long, title: String, text: String, percent: Int? = null) {
@@ -48,37 +67,127 @@ class TorrentService : Service() {
             .notify(2000 + id.toInt(), buildNotification(title, text, percent))
     }
 
+    private fun formatSpeed(bytesPerSec: Long): String {
+        if (bytesPerSec <= 0) return "0 B/s"
+        val units = arrayOf("B/s", "KB/s", "MB/s", "GB/s")
+        var v = bytesPerSec.toDouble()
+        var i = 0
+        while (v >= 1024 && i < units.lastIndex) { v /= 1024; i++ }
+        return String.format(Locale.US, "%.1f %s", v, units[i])
+    }
+
     private fun onFinishedOrError(id: Long) {
         active.remove(id)
-        if (active.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+        itemNames.remove(id)
+        if (active.isEmpty()) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val id = intent?.getLongExtra("id", 0L) ?: return START_NOT_STICKY
+
         when (intent.action) {
             ACTION_START_MAGNET, ACTION_START_FILE -> {
                 active.add(id)
-                startForeground(1002, buildNotification("F2L Downloader", "Fetching torrent metadata… (can take up to a minute)"))
 
-                val onNameKnown: (String) -> Unit = { name -> persist(id) { it.copy(fileName = name) } }
+                val initialItem = repo.load().find { it.id == id }
+                val initialName = initialItem?.fileName ?: "Torrent Download"
+                itemNames[id] = initialName
+
+                val notif = buildNotification("F2L Downloader", "Connecting to BitTorrent swarm…")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ServiceCompat.startForeground(this, 1002, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+                } else {
+                    startForeground(1002, notif)
+                }
+
+                val onNameKnown: (String) -> Unit = { name ->
+                    itemNames[id] = name
+                    persist(id) { it.copy(fileName = name) }
+                    sendBroadcast(Intent(DownloadService.ACTION_PROGRESS).apply {
+                        setPackage(packageName)
+                        putExtra("id", id)
+                        putExtra("name", name)
+                        putExtra("isTorrent", true)
+                    })
+                }
+
+                var lastBroadcast = 0L
                 val onProgress: (TorrentEngine.Progress) -> Unit = { p ->
+                    val resolvedName = p.resolvedName ?: itemNames[id] ?: "Torrent"
+                    itemNames[id] = resolvedName
+
+                    val now = System.currentTimeMillis()
+                    // Persist state periodically
+                    if (now - lastBroadcast > 900) {
+                        lastBroadcast = now
+                        persist(id) {
+                            it.copy(
+                                fileName = resolvedName,
+                                status = DownloadItem.Status.DOWNLOADING,
+                                downloadedBytes = p.downloadedBytes,
+                                totalBytes = if (p.totalBytes > 0) p.totalBytes else it.totalBytes,
+                                speedBytesPerSec = p.speedBytesPerSec,
+                                seeders = p.seeders,
+                                peers = p.peers,
+                                etaSeconds = if (p.totalBytes > p.downloadedBytes && p.speedBytesPerSec > 0)
+                                    (p.totalBytes - p.downloadedBytes) / p.speedBytesPerSec else -1L
+                            )
+                        }
+
+                        val notifText = if (p.hasMetadata && p.totalBytes > 0) {
+                            "${p.percent}% • ${formatSpeed(p.speedBytesPerSec)} • ${p.seeders}S / ${p.peers}P"
+                        } else {
+                            "Finding peers… (${p.seeders} seeds, ${p.peers} peers)"
+                        }
+                        notify(id, resolvedName, notifText, if (p.hasMetadata) p.percent else null)
+                    }
+
+                    // Always send live broadcast to UI
+                    sendBroadcast(Intent(DownloadService.ACTION_PROGRESS).apply {
+                        setPackage(packageName)
+                        putExtra("id", id)
+                        putExtra("downloaded", p.downloadedBytes)
+                        putExtra("total", p.totalBytes)
+                        putExtra("speed", p.speedBytesPerSec)
+                        putExtra("seeders", p.seeders)
+                        putExtra("peers", p.peers)
+                        putExtra("percent", p.percent)
+                        putExtra("isTorrent", true)
+                        if (p.resolvedName != null) putExtra("name", p.resolvedName)
+                    })
+                }
+
+                val onDone: () -> Unit = {
+                    val finalName = itemNames[id] ?: "Torrent"
                     persist(id) {
                         it.copy(
-                            status = DownloadItem.Status.DOWNLOADING,
-                            downloadedBytes = p.percent.toLong(), totalBytes = 100L,
-                            speedBytesPerSec = p.speedBytesPerSec.toLong(),
-                            seeders = p.seeders, peers = p.peers
+                            fileName = finalName,
+                            status = DownloadItem.Status.COMPLETED,
+                            downloadedBytes = if (it.totalBytes > 0) it.totalBytes else it.downloadedBytes,
+                            speedBytesPerSec = 0,
+                            etaSeconds = -1
                         )
                     }
-                    notify(id, "Torrent", "${p.percent}% • ${p.seeders} seeders • ${p.peers} peers", p.percent)
-                }
-                val onDone: () -> Unit = {
-                    persist(id) { it.copy(status = DownloadItem.Status.COMPLETED, downloadedBytes = 100L, totalBytes = 100L, speedBytesPerSec = 0) }
-                    notify(id, "Torrent", "Download complete", 100)
+                    notify(id, finalName, "Download complete", 100)
+                    sendBroadcast(Intent(DownloadService.ACTION_FINISHED).apply {
+                        setPackage(packageName)
+                        putExtra("id", id)
+                        putExtra("isTorrent", true)
+                    })
                     onFinishedOrError(id)
                 }
+
                 val onError: (String) -> Unit = { message ->
-                    persist(id) { it.copy(status = DownloadItem.Status.FAILED, error = message) }
+                    persist(id) { it.copy(status = DownloadItem.Status.FAILED, error = message, speedBytesPerSec = 0) }
+                    sendBroadcast(Intent(DownloadService.ACTION_FAILED).apply {
+                        setPackage(packageName)
+                        putExtra("id", id)
+                        putExtra("error", message)
+                        putExtra("isTorrent", true)
+                    })
                     onFinishedOrError(id)
                 }
 
@@ -86,28 +195,70 @@ class TorrentService : Service() {
                     val magnet = intent.getStringExtra("magnet") ?: return START_NOT_STICKY
                     TorrentEngine.startMagnet(this, id, magnet, onNameKnown, onProgress, onDone, onError)
                 } else {
-                    val bytes = intent.getByteArrayExtra("torrentBytes") ?: return START_NOT_STICKY
+                    val bytes = intent.getByteArrayExtra("torrentBytes")
+                        ?: TorrentEngine.getSavedTorrentFile(this, id)?.readBytes()
+                        ?: return START_NOT_STICKY
                     TorrentEngine.startTorrentFile(this, id, bytes, onNameKnown, onProgress, onDone, onError)
                 }
+            }
 
-                // Watchdog: if metadata fetch is still stuck 100s from now (past even the 60s
-                // fetchMagnet timeout plus DHT warmup), something hung without ever throwing —
-                // fail it visibly instead of leaving "Fetching torrent metadata…" forever with
-                // no feedback at all.
-                Thread {
-                    Thread.sleep(100_000)
-                    if (active.contains(id)) {
-                        val current = repo.load().find { it.id == id }
-                        if (current != null && current.status != DownloadItem.Status.COMPLETED && current.status != DownloadItem.Status.FAILED) {
-                            onError("Timed out waiting for torrent metadata. This usually means DHT (UDP) traffic is blocked on this network, or the swarm has no reachable peers.")
+            ACTION_PAUSE -> {
+                TorrentEngine.pause(id)
+                active.remove(id)
+                persist(id) { it.copy(status = DownloadItem.Status.PAUSED, speedBytesPerSec = 0) }
+                sendBroadcast(Intent(DownloadService.ACTION_PROGRESS).apply {
+                    setPackage(packageName)
+                    putExtra("id", id)
+                    putExtra("paused", true)
+                    putExtra("isTorrent", true)
+                })
+                getSystemService(NotificationManager::class.java).cancel(2000 + id.toInt())
+                if (active.isEmpty()) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
+
+            ACTION_RESUME -> {
+                if (TorrentEngine.hasHandle(id)) {
+                    active.add(id)
+                    TorrentEngine.resume(id)
+                    persist(id) { it.copy(status = DownloadItem.Status.DOWNLOADING, error = null) }
+                } else {
+                    val item = repo.load().find { it.id == id }
+                    if (item != null) {
+                        if (item.url.startsWith("magnet:")) {
+                            val nextIntent = Intent(this, TorrentService::class.java).apply {
+                                action = ACTION_START_MAGNET
+                                putExtra("id", id)
+                                putExtra("magnet", item.url)
+                            }
+                            startService(nextIntent)
+                        } else {
+                            val savedFile = TorrentEngine.getSavedTorrentFile(this, id)
+                            if (savedFile != null) {
+                                val nextIntent = Intent(this, TorrentService::class.java).apply {
+                                    action = ACTION_START_FILE
+                                    putExtra("id", id)
+                                    putExtra("torrentBytes", savedFile.readBytes())
+                                }
+                                startService(nextIntent)
+                            }
                         }
                     }
-                }.also { it.isDaemon = true; it.start() }
+                }
             }
+
             ACTION_REMOVE -> {
                 TorrentEngine.remove(id)
                 active.remove(id)
-                if (active.isEmpty()) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+                itemNames.remove(id)
+                runCatching { File(filesDir, "torrents/$id.torrent").delete() }
+                getSystemService(NotificationManager::class.java).cancel(2000 + id.toInt())
+                if (active.isEmpty()) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
             }
         }
         return START_NOT_STICKY
