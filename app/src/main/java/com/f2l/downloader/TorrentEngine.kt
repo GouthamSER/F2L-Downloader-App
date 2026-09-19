@@ -45,7 +45,6 @@ object TorrentEngine {
     private val session: SessionManager by lazy {
         SessionManager().also { sm ->
             sm.start()
-            runCatching { sm.dht(true) }
         }
     }
 
@@ -97,7 +96,7 @@ object TorrentEngine {
             val ec = error_code()
             val p = libtorrent.parse_magnet_uri(magnetUri, ec)
             if (ec.value() == 0) {
-                p.info_hashes.best.to_hex()
+                p.info_hashes.get_best().to_hex()
             } else {
                 val match = Regex("""xt=urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})""", RegexOption.IGNORE_CASE).find(magnetUri)
                 match?.groupValues?.get(1)
@@ -308,7 +307,8 @@ object TorrentEngine {
                         var newName: String? = null
                         if (hasMeta) {
                             val tf = runCatching { handle.torrentFile() }.getOrNull()
-                            val n = tf?.name() ?: handle.name()
+                            val n = tf?.name()?.takeIf { it.isNotBlank() }
+                                ?: runCatching { status.name() }.getOrNull()?.takeIf { it.isNotBlank() }
                             if (!n.isNullOrBlank() && n != lastResolvedName && !n.startsWith("magnet:")) {
                                 lastResolvedName = n
                                 newName = n
@@ -398,7 +398,8 @@ object TorrentEngine {
                         val handleHash = runCatching { handle?.infoHash()?.toHex()?.lowercase() }.getOrNull()
                         if (handle != null && (targetHash.isNullOrBlank() || targetHash.equals(handleHash, ignoreCase = true))) {
                             val tf = runCatching { handle.torrentFile() }.getOrNull()
-                            val name = tf?.name() ?: handle.name()
+                            val name = tf?.name()?.takeIf { it.isNotBlank() }
+                                ?: runCatching { handle.status().name() }.getOrNull()?.takeIf { it.isNotBlank() }
                             if (!name.isNullOrBlank() && !name.startsWith("magnet:")) {
                                 onNameKnown(name)
                             }
