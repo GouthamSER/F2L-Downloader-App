@@ -67,6 +67,15 @@ class TorrentService : Service() {
             .notify(2000 + id.toInt(), buildNotification(title, text, percent))
     }
 
+    private fun ensureForeground(title: String = "F2L Downloader", text: String = "Connecting to BitTorrent swarm…", percent: Int? = null) {
+        val notif = buildNotification(title, text, percent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ServiceCompat.startForeground(this, 1002, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        } else {
+            startForeground(1002, notif)
+        }
+    }
+
     private fun formatSpeed(bytesPerSec: Long): String {
         if (bytesPerSec <= 0) return "0 B/s"
         val units = arrayOf("B/s", "KB/s", "MB/s", "GB/s")
@@ -87,121 +96,9 @@ class TorrentService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val id = intent?.getLongExtra("id", 0L) ?: return START_NOT_STICKY
+        val action = intent.action ?: return START_NOT_STICKY
 
-        when (intent.action) {
-            ACTION_START_MAGNET, ACTION_START_FILE -> {
-                active.add(id)
-
-                val initialItem = repo.load().find { it.id == id }
-                val initialName = initialItem?.fileName ?: "Torrent Download"
-                itemNames[id] = initialName
-
-                val notif = buildNotification("F2L Downloader", "Connecting to BitTorrent swarm…")
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    ServiceCompat.startForeground(this, 1002, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-                } else {
-                    startForeground(1002, notif)
-                }
-
-                val onNameKnown: (String) -> Unit = { name ->
-                    itemNames[id] = name
-                    persist(id) { it.copy(fileName = name) }
-                    sendBroadcast(Intent(DownloadService.ACTION_PROGRESS).apply {
-                        setPackage(packageName)
-                        putExtra("id", id)
-                        putExtra("name", name)
-                        putExtra("isTorrent", true)
-                    })
-                }
-
-                var lastBroadcast = 0L
-                val onProgress: (TorrentEngine.Progress) -> Unit = { p ->
-                    val resolvedName = p.resolvedName ?: itemNames[id] ?: "Torrent"
-                    itemNames[id] = resolvedName
-
-                    val now = System.currentTimeMillis()
-                    // Persist state periodically
-                    if (now - lastBroadcast > 900) {
-                        lastBroadcast = now
-                        persist(id) {
-                            it.copy(
-                                fileName = resolvedName,
-                                status = DownloadItem.Status.DOWNLOADING,
-                                downloadedBytes = p.downloadedBytes,
-                                totalBytes = if (p.totalBytes > 0) p.totalBytes else it.totalBytes,
-                                speedBytesPerSec = p.speedBytesPerSec,
-                                seeders = p.seeders,
-                                peers = p.peers,
-                                etaSeconds = if (p.totalBytes > p.downloadedBytes && p.speedBytesPerSec > 0)
-                                    (p.totalBytes - p.downloadedBytes) / p.speedBytesPerSec else -1L
-                            )
-                        }
-
-                        val notifText = if (p.hasMetadata && p.totalBytes > 0) {
-                            "${p.percent}% • ${formatSpeed(p.speedBytesPerSec)} • ${p.seeders}S / ${p.peers}P"
-                        } else {
-                            "Finding peers… (${p.seeders} seeds, ${p.peers} peers)"
-                        }
-                        notify(id, resolvedName, notifText, if (p.hasMetadata) p.percent else null)
-                    }
-
-                    // Always send live broadcast to UI
-                    sendBroadcast(Intent(DownloadService.ACTION_PROGRESS).apply {
-                        setPackage(packageName)
-                        putExtra("id", id)
-                        putExtra("downloaded", p.downloadedBytes)
-                        putExtra("total", p.totalBytes)
-                        putExtra("speed", p.speedBytesPerSec)
-                        putExtra("seeders", p.seeders)
-                        putExtra("peers", p.peers)
-                        putExtra("percent", p.percent)
-                        putExtra("isTorrent", true)
-                        if (p.resolvedName != null) putExtra("name", p.resolvedName)
-                    })
-                }
-
-                val onDone: () -> Unit = {
-                    val finalName = itemNames[id] ?: "Torrent"
-                    persist(id) {
-                        it.copy(
-                            fileName = finalName,
-                            status = DownloadItem.Status.COMPLETED,
-                            downloadedBytes = if (it.totalBytes > 0) it.totalBytes else it.downloadedBytes,
-                            speedBytesPerSec = 0,
-                            etaSeconds = -1
-                        )
-                    }
-                    notify(id, finalName, "Download complete", 100)
-                    sendBroadcast(Intent(DownloadService.ACTION_FINISHED).apply {
-                        setPackage(packageName)
-                        putExtra("id", id)
-                        putExtra("isTorrent", true)
-                    })
-                    onFinishedOrError(id)
-                }
-
-                val onError: (String) -> Unit = { message ->
-                    persist(id) { it.copy(status = DownloadItem.Status.FAILED, error = message, speedBytesPerSec = 0) }
-                    sendBroadcast(Intent(DownloadService.ACTION_FAILED).apply {
-                        setPackage(packageName)
-                        putExtra("id", id)
-                        putExtra("error", message)
-                        putExtra("isTorrent", true)
-                    })
-                    onFinishedOrError(id)
-                }
-
-                if (intent.action == ACTION_START_MAGNET) {
-                    val magnet = intent.getStringExtra("magnet") ?: return START_NOT_STICKY
-                    TorrentEngine.startMagnet(this, id, magnet, onNameKnown, onProgress, onDone, onError)
-                } else {
-                    val bytes = intent.getByteArrayExtra("torrentBytes")
-                        ?: TorrentEngine.getSavedTorrentFile(this, id)?.readBytes()
-                        ?: return START_NOT_STICKY
-                    TorrentEngine.startTorrentFile(this, id, bytes, onNameKnown, onProgress, onDone, onError)
-                }
-            }
-
+        when (action) {
             ACTION_PAUSE -> {
                 TorrentEngine.pause(id)
                 active.remove(id)
@@ -217,36 +114,7 @@ class TorrentService : Service() {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
-            }
-
-            ACTION_RESUME -> {
-                if (TorrentEngine.hasHandle(id)) {
-                    active.add(id)
-                    TorrentEngine.resume(id)
-                    persist(id) { it.copy(status = DownloadItem.Status.DOWNLOADING, error = null) }
-                } else {
-                    val item = repo.load().find { it.id == id }
-                    if (item != null) {
-                        if (item.url.startsWith("magnet:")) {
-                            val nextIntent = Intent(this, TorrentService::class.java).apply {
-                                action = ACTION_START_MAGNET
-                                putExtra("id", id)
-                                putExtra("magnet", item.url)
-                            }
-                            startService(nextIntent)
-                        } else {
-                            val savedFile = TorrentEngine.getSavedTorrentFile(this, id)
-                            if (savedFile != null) {
-                                val nextIntent = Intent(this, TorrentService::class.java).apply {
-                                    action = ACTION_START_FILE
-                                    putExtra("id", id)
-                                    putExtra("torrentBytes", savedFile.readBytes())
-                                }
-                                startService(nextIntent)
-                            }
-                        }
-                    }
-                }
+                return START_NOT_STICKY
             }
 
             ACTION_REMOVE -> {
@@ -259,6 +127,136 @@ class TorrentService : Service() {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                     stopSelf()
                 }
+                return START_NOT_STICKY
+            }
+        }
+
+        // For ACTION_START_MAGNET, ACTION_START_FILE, and ACTION_RESUME:
+        active.add(id)
+        val initialItem = repo.load().find { it.id == id }
+        val initialName = initialItem?.fileName ?: "Torrent Download"
+        itemNames[id] = initialName
+
+        // ALWAYS call startForeground immediately to avoid ForegroundServiceDidNotStartInTimeException
+        ensureForeground("F2L Downloader", "Connecting to BitTorrent swarm: $initialName")
+
+        val onNameKnown: (String) -> Unit = { name ->
+            itemNames[id] = name
+            persist(id) { it.copy(fileName = name) }
+            sendBroadcast(Intent(DownloadService.ACTION_PROGRESS).apply {
+                setPackage(packageName)
+                putExtra("id", id)
+                putExtra("name", name)
+                putExtra("isTorrent", true)
+            })
+        }
+
+        var lastBroadcast = 0L
+        val onProgress: (TorrentEngine.Progress) -> Unit = { p ->
+            val resolvedName = p.resolvedName ?: itemNames[id] ?: "Torrent"
+            itemNames[id] = resolvedName
+
+            val now = System.currentTimeMillis()
+            if (now - lastBroadcast > 900) {
+                lastBroadcast = now
+                persist(id) {
+                    it.copy(
+                        fileName = resolvedName,
+                        status = DownloadItem.Status.DOWNLOADING,
+                        downloadedBytes = p.downloadedBytes,
+                        totalBytes = if (p.totalBytes > 0) p.totalBytes else it.totalBytes,
+                        speedBytesPerSec = p.speedBytesPerSec,
+                        seeders = p.seeders,
+                        peers = p.peers,
+                        etaSeconds = if (p.totalBytes > p.downloadedBytes && p.speedBytesPerSec > 0)
+                            (p.totalBytes - p.downloadedBytes) / p.speedBytesPerSec else -1L
+                    )
+                }
+
+                val notifText = if (p.hasMetadata && p.totalBytes > 0) {
+                    "${p.percent}% • ${formatSpeed(p.speedBytesPerSec)} • ${p.seeders}S / ${p.peers}P"
+                } else {
+                    "Finding peers… (${p.seeders} seeds, ${p.peers} peers)"
+                }
+                notify(id, resolvedName, notifText, if (p.hasMetadata) p.percent else null)
+            }
+
+            sendBroadcast(Intent(DownloadService.ACTION_PROGRESS).apply {
+                setPackage(packageName)
+                putExtra("id", id)
+                putExtra("downloaded", p.downloadedBytes)
+                putExtra("total", p.totalBytes)
+                putExtra("speed", p.speedBytesPerSec)
+                putExtra("seeders", p.seeders)
+                putExtra("peers", p.peers)
+                putExtra("percent", p.percent)
+                putExtra("isTorrent", true)
+                if (p.resolvedName != null) putExtra("name", p.resolvedName)
+            })
+        }
+
+        val onDone: () -> Unit = {
+            val finalName = itemNames[id] ?: "Torrent"
+            persist(id) {
+                it.copy(
+                    fileName = finalName,
+                    status = DownloadItem.Status.COMPLETED,
+                    downloadedBytes = if (it.totalBytes > 0) it.totalBytes else it.downloadedBytes,
+                    speedBytesPerSec = 0,
+                    etaSeconds = -1
+                )
+            }
+            notify(id, finalName, "Download complete", 100)
+            sendBroadcast(Intent(DownloadService.ACTION_FINISHED).apply {
+                setPackage(packageName)
+                putExtra("id", id)
+                putExtra("isTorrent", true)
+            })
+            onFinishedOrError(id)
+        }
+
+        val onError: (String) -> Unit = { message ->
+            persist(id) { it.copy(status = DownloadItem.Status.FAILED, error = message, speedBytesPerSec = 0) }
+            sendBroadcast(Intent(DownloadService.ACTION_FAILED).apply {
+                setPackage(packageName)
+                putExtra("id", id)
+                putExtra("error", message)
+                putExtra("isTorrent", true)
+            })
+            onFinishedOrError(id)
+        }
+
+        when (action) {
+            ACTION_START_MAGNET -> {
+                val magnet = intent.getStringExtra("magnet") ?: return START_NOT_STICKY
+                TorrentEngine.startMagnet(this, id, magnet, onNameKnown, onProgress, onDone, onError)
+            }
+            ACTION_START_FILE -> {
+                val bytes = intent.getByteArrayExtra("torrentBytes")
+                    ?: TorrentEngine.getSavedTorrentFile(this, id)?.readBytes()
+                    ?: return START_NOT_STICKY
+                TorrentEngine.startTorrentFile(this, id, bytes, onNameKnown, onProgress, onDone, onError)
+            }
+            ACTION_RESUME -> {
+                val resumed = TorrentEngine.resume(id, onNameKnown, onProgress, onDone, onError)
+                if (!resumed) {
+                    val item = repo.load().find { it.id == id }
+                    if (item != null) {
+                        if (item.url.startsWith("magnet:")) {
+                            TorrentEngine.startMagnet(this, id, item.url, onNameKnown, onProgress, onDone, onError)
+                        } else {
+                            val savedFile = TorrentEngine.getSavedTorrentFile(this, id)
+                            if (savedFile != null) {
+                                TorrentEngine.startTorrentFile(this, id, savedFile.readBytes(), onNameKnown, onProgress, onDone, onError)
+                            } else {
+                                onError("Torrent file not found")
+                            }
+                        }
+                    } else {
+                        onError("Download item not found")
+                    }
+                }
+                persist(id) { it.copy(status = DownloadItem.Status.DOWNLOADING, error = null) }
             }
         }
         return START_NOT_STICKY

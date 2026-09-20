@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * High-performance BitTorrent & magnet engine backed by org.libtorrent4j.
  * Uses native non-blocking libtorrent sessions with peer discovery, metadata fetching,
- * tracker injection, and live metric reporting.
+ * tracker injection, and continuous live metric reporting.
  */
 object TorrentEngine {
 
@@ -42,14 +42,127 @@ object TorrentEngine {
         val resolvedName: String? = null
     )
 
-    private val session: SessionManager by lazy {
-        SessionManager().also { sm ->
-            sm.start()
+    data class TorrentCallbacks(
+        val onNameKnown: (String) -> Unit,
+        val onProgress: (Progress) -> Unit,
+        val onDone: () -> Unit,
+        val onError: (String) -> Unit
+    )
+
+    internal class TorrentTask(
+        val id: Long,
+        @Volatile var targetHash: String?,
+        @Volatile var handle: TorrentHandle?,
+        @Volatile var callbacks: TorrentCallbacks?,
+        val isPaused: AtomicBoolean = AtomicBoolean(false),
+        val isFinished: AtomicBoolean = AtomicBoolean(false),
+        @Volatile var lastDownloadedBytes: Long = 0L,
+        @Volatile var lastProgressTime: Long = 0L,
+        @Volatile var lastResolvedName: String? = null
+    )
+
+    private val tasks = ConcurrentHashMap<Long, TorrentTask>()
+
+    private val globalAlertListener = object : AlertListener {
+        override fun types(): IntArray? = null
+
+        override fun alert(alert: Alert<*>) {
+            when (alert.type()) {
+                AlertType.ADD_TORRENT -> {
+                    val addAlert = alert as? AddTorrentAlert ?: return
+                    val handle = addAlert.handle()
+                    val hash = runCatching { handle.infoHash().toHex().lowercase() }.getOrNull()
+
+                    val task = if (!hash.isNullOrBlank()) {
+                        tasks.values.firstOrNull { it.targetHash.equals(hash, ignoreCase = true) }
+                            ?: tasks.values.firstOrNull { it.handle == null && it.targetHash == null }
+                    } else {
+                        tasks.values.firstOrNull { it.handle == null }
+                    }
+
+                    if (task != null) {
+                        task.handle = handle
+                        if (task.targetHash.isNullOrBlank() && !hash.isNullOrBlank()) {
+                            task.targetHash = hash
+                        }
+                        if (task.isPaused.get()) {
+                            runCatching { handle.pause() }
+                        } else {
+                            runCatching { handle.resume() }
+                        }
+                        ensurePolling()
+                    }
+                }
+
+                AlertType.METADATA_RECEIVED -> {
+                    val metaAlert = alert as? MetadataReceivedAlert ?: return
+                    val handle = metaAlert.handle()
+                    val hash = runCatching { handle.infoHash().toHex().lowercase() }.getOrNull()
+                    val task = tasks.values.firstOrNull {
+                        it.handle == handle || (!hash.isNullOrBlank() && it.targetHash.equals(hash, ignoreCase = true))
+                    }
+                    if (task != null) {
+                        task.handle = handle
+                        val tf = runCatching { handle.torrentFile() }.getOrNull()
+                        val name = tf?.name()?.takeIf { it.isNotBlank() }
+                            ?: runCatching { handle.status().name() }.getOrNull()?.takeIf { it.isNotBlank() }
+                        if (!name.isNullOrBlank() && !name.startsWith("magnet:")) {
+                            task.lastResolvedName = name
+                            task.callbacks?.onNameKnown?.invoke(name)
+                        }
+                    }
+                }
+
+                AlertType.TORRENT_FINISHED -> {
+                    val finishAlert = alert as? TorrentFinishedAlert ?: return
+                    val handle = finishAlert.handle()
+                    val hash = runCatching { handle.infoHash().toHex().lowercase() }.getOrNull()
+                    val task = tasks.values.firstOrNull {
+                        it.handle == handle || (!hash.isNullOrBlank() && it.targetHash.equals(hash, ignoreCase = true))
+                    }
+                    if (task != null && task.isFinished.compareAndSet(false, true)) {
+                        task.callbacks?.onProgress?.invoke(
+                            Progress(
+                                percent = 100,
+                                speedBytesPerSec = 0L,
+                                seeders = runCatching { handle.status().numSeeds() }.getOrDefault(0),
+                                peers = runCatching { handle.status().numPeers() }.getOrDefault(0),
+                                downloadedBytes = runCatching { handle.status().totalDone() }.getOrDefault(0L),
+                                totalBytes = runCatching { handle.status().totalWanted() }.getOrDefault(-1L),
+                                hasMetadata = true,
+                                resolvedName = task.lastResolvedName
+                            )
+                        )
+                        task.callbacks?.onDone?.invoke()
+                        tasks.remove(task.id)
+                    }
+                }
+
+                AlertType.TORRENT_ERROR -> {
+                    val errAlert = alert as? TorrentErrorAlert ?: return
+                    val handle = errAlert.handle()
+                    val hash = runCatching { handle.infoHash().toHex().lowercase() }.getOrNull()
+                    val task = tasks.values.firstOrNull {
+                        it.handle == handle || (!hash.isNullOrBlank() && it.targetHash.equals(hash, ignoreCase = true))
+                    }
+                    if (task != null && task.isFinished.compareAndSet(false, true)) {
+                        val msg = errAlert.message() ?: "BitTorrent error occurred"
+                        task.callbacks?.onError?.invoke(msg)
+                        tasks.remove(task.id)
+                    }
+                }
+
+                else -> {}
+            }
         }
     }
 
-    private val handles = ConcurrentHashMap<Long, TorrentHandle>()
-    private val stopFlags = ConcurrentHashMap<Long, AtomicBoolean>()
+    private val session: SessionManager by lazy {
+        SessionManager().also { sm ->
+            sm.addListener(globalAlertListener)
+            sm.start()
+        }
+    }
 
     // Tier 1 reliable public trackers to accelerate swarm discovery
     val PUBLIC_TRACKERS = listOf(
@@ -151,8 +264,6 @@ object TorrentEngine {
 
     /**
      * Starts or resumes a magnet download.
-     * Uses libtorrent's native async magnet processing — starts searching peers immediately,
-     * pulls metadata via DHT and trackers, and streams file data without blocking.
      */
     fun startMagnet(
         context: Context,
@@ -174,19 +285,29 @@ object TorrentEngine {
                 val targetHash = parseInfoHash(enriched)?.lowercase()
                 val dir = saveDir(context)
 
-                // Check if already in session (e.g. after pause/resume)
-                if (!targetHash.isNullOrBlank()) {
-                    val existing = findHandle(targetHash)
-                    if (existing != null && existing.isValid) {
-                        handles[id] = existing
-                        existing.resume()
-                        attachAlertsAndPolling(id, targetHash, existing, onNameKnown, onProgress, onDone, onError)
-                        return@Thread
-                    }
+                val callbacks = TorrentCallbacks(onNameKnown, onProgress, onDone, onError)
+                val task = tasks.computeIfAbsent(id) {
+                    TorrentTask(id, targetHash, null, callbacks)
+                }
+                task.callbacks = callbacks
+                task.targetHash = targetHash
+                task.isPaused.set(false)
+                task.isFinished.set(false)
+                if (!initialName.isNullOrBlank()) {
+                    task.lastResolvedName = initialName
                 }
 
-                attachAlertsAndPolling(id, targetHash, null, onNameKnown, onProgress, onDone, onError)
+                // Check if already in session
+                val existing = if (!targetHash.isNullOrBlank()) findHandle(targetHash) else null
+                if (existing != null && existing.isValid) {
+                    task.handle = existing
+                    existing.resume()
+                    ensurePolling()
+                    return@Thread
+                }
+
                 session.download(enriched, dir, torrent_flags_t())
+                ensurePolling()
             } catch (e: Throwable) {
                 onError(e.message ?: "Failed to start magnet download (${e.javaClass.simpleName})")
             }
@@ -207,7 +328,6 @@ object TorrentEngine {
     ) {
         Thread {
             try {
-                // Save torrent bytes to internal cache for persistence across app restarts
                 saveTorrentFile(context, id, torrentBytes)
 
                 val info = TorrentInfo(torrentBytes)
@@ -216,51 +336,90 @@ object TorrentEngine {
                 val name = info.name() ?: "torrent"
                 onNameKnown(name)
 
-                // Check if already in session
+                val callbacks = TorrentCallbacks(onNameKnown, onProgress, onDone, onError)
+                val task = tasks.computeIfAbsent(id) {
+                    TorrentTask(id, targetHash, null, callbacks)
+                }
+                task.callbacks = callbacks
+                task.targetHash = targetHash
+                task.isPaused.set(false)
+                task.isFinished.set(false)
+                task.lastResolvedName = name
+
                 val existing = findHandle(targetHash)
                 if (existing != null && existing.isValid) {
-                    handles[id] = existing
+                    task.handle = existing
                     existing.resume()
-                    attachAlertsAndPolling(id, targetHash, existing, onNameKnown, onProgress, onDone, onError)
+                    ensurePolling()
                     return@Thread
                 }
 
-                attachAlertsAndPolling(id, targetHash, null, onNameKnown, onProgress, onDone, onError)
                 session.download(info, dir)
+                ensurePolling()
             } catch (e: Throwable) {
                 onError(e.message ?: "Failed to start torrent file (${e.javaClass.simpleName})")
             }
         }.start()
     }
 
-    fun hasHandle(id: Long): Boolean = handles[id]?.isValid == true
+    fun hasHandle(id: Long): Boolean = tasks[id]?.handle?.isValid == true
 
     /**
      * Pauses the torrent without removing it.
      */
     fun pause(id: Long) {
-        stopFlags[id]?.set(true)
-        handles[id]?.let { runCatching { it.pause() } }
+        val task = tasks[id]
+        if (task != null) {
+            task.isPaused.set(true)
+            task.handle?.let { runCatching { it.pause() } }
+        }
     }
 
     /**
      * Resumes a paused torrent.
      */
-    fun resume(id: Long) {
-        stopFlags[id]?.set(false)
-        handles[id]?.let { runCatching { it.resume() } }
+    fun resume(
+        id: Long,
+        onNameKnown: (String) -> Unit,
+        onProgress: (Progress) -> Unit,
+        onDone: () -> Unit,
+        onError: (String) -> Unit
+    ): Boolean {
+        val task = tasks[id]
+        if (task != null) {
+            task.callbacks = TorrentCallbacks(onNameKnown, onProgress, onDone, onError)
+            task.isPaused.set(false)
+            task.lastProgressTime = System.currentTimeMillis()
+            val handle = task.handle
+            if (handle != null && handle.isValid) {
+                runCatching { handle.resume() }
+            } else if (!task.targetHash.isNullOrBlank()) {
+                val found = findHandle(task.targetHash!!)
+                if (found != null && found.isValid) {
+                    task.handle = found
+                    runCatching { found.resume() }
+                }
+            }
+            ensurePolling()
+            return true
+        }
+        return false
     }
 
     /**
      * Completely removes a torrent from the session.
      */
     fun remove(id: Long) {
-        stopFlags.remove(id)?.set(true)
-        val handle = handles.remove(id)
-        if (handle != null && handle.isValid) {
-            runCatching {
-                handle.pause()
-                session.remove(handle)
+        val task = tasks.remove(id)
+        if (task != null) {
+            task.isFinished.set(true)
+            task.isPaused.set(true)
+            val handle = task.handle
+            if (handle != null && handle.isValid) {
+                runCatching {
+                    handle.pause()
+                    session.remove(handle)
+                }
             }
         }
     }
@@ -274,169 +433,109 @@ object TorrentEngine {
         }
     }
 
-    private fun attachAlertsAndPolling(
-        id: Long,
-        targetHash: String?,
-        initialHandle: TorrentHandle?,
-        onNameKnown: (String) -> Unit,
-        onProgress: (Progress) -> Unit,
-        onDone: () -> Unit,
-        onError: (String) -> Unit
-    ) {
-        var myHandle: TorrentHandle? = initialHandle
-        val finished = AtomicBoolean(false)
-        val stopped = AtomicBoolean(false)
-        stopFlags[id] = stopped
+    private val pollingLock = Any()
+    @Volatile private var pollingThread: Thread? = null
 
-        fun startPolling(handle: TorrentHandle) {
-            Thread {
-                var lastResolvedName = ""
-                while (!finished.get() && !stopped.get()) {
-                    try {
-                        if (!handle.isValid) break
-                        val status = handle.status()
-                        val progressFloat = status.progress()
-                        val percent = (progressFloat * 100).toInt().coerceIn(0, 100)
-                        val speed = status.downloadPayloadRate().toLong().coerceAtLeast(0L)
-                        val seeders = status.numSeeds().coerceAtLeast(0)
-                        val peers = status.numPeers().coerceAtLeast(0)
-                        val downloaded = status.totalDone().coerceAtLeast(0L)
-                        val total = if (status.totalWanted() > 0) status.totalWanted() else -1L
-                        val hasMeta = status.hasMetadata()
-
-                        var newName: String? = null
-                        if (hasMeta) {
-                            val tf = runCatching { handle.torrentFile() }.getOrNull()
-                            val n = tf?.name()?.takeIf { it.isNotBlank() }
-                                ?: runCatching { status.name() }.getOrNull()?.takeIf { it.isNotBlank() }
-                            if (!n.isNullOrBlank() && n != lastResolvedName && !n.startsWith("magnet:")) {
-                                lastResolvedName = n
-                                newName = n
-                                onNameKnown(n)
-                            }
-                        }
-
-                        onProgress(
-                            Progress(
-                                percent = percent,
-                                speedBytesPerSec = speed,
-                                seeders = seeders,
-                                peers = peers,
-                                downloadedBytes = downloaded,
-                                totalBytes = total,
-                                hasMetadata = hasMeta,
-                                resolvedName = newName
-                            )
-                        )
-
-                        val state = status.state()
-                        if (percent >= 100 || state == TorrentStatus.State.FINISHED || state == TorrentStatus.State.SEEDING) {
-                            if (finished.compareAndSet(false, true)) {
-                                onProgress(
-                                    Progress(
-                                        percent = 100,
-                                        speedBytesPerSec = 0L,
-                                        seeders = seeders,
-                                        peers = peers,
-                                        downloadedBytes = if (total > 0) total else downloaded,
-                                        totalBytes = total,
-                                        hasMetadata = true,
-                                        resolvedName = newName
-                                    )
-                                )
-                                onDone()
-                                handles.remove(id)
-                                stopFlags.remove(id)
-                            }
+    private fun ensurePolling() {
+        synchronized(pollingLock) {
+            if (pollingThread?.isAlive == true) return
+            pollingThread = Thread({
+                var idleSeconds = 0
+                while (true) {
+                    val activeTasks = tasks.values.filter { !it.isFinished.get() && !it.isPaused.get() }
+                    if (activeTasks.isEmpty()) {
+                        idleSeconds++
+                        if (idleSeconds > 10) {
                             break
                         }
-                    } catch (_: Exception) {
-                        // Handle may become temporarily invalid during state transitions
+                    } else {
+                        idleSeconds = 0
                     }
+
+                    for (task in tasks.values) {
+                        if (task.isFinished.get() || task.isPaused.get()) continue
+                        val handle = task.handle
+                        if (handle == null || !handle.isValid) continue
+
+                        try {
+                            val status = handle.status()
+                            val progressFloat = status.progress()
+                            val percent = (progressFloat * 100).toInt().coerceIn(0, 100)
+                            val seeders = status.numSeeds().coerceAtLeast(0)
+                            val peers = status.numPeers().coerceAtLeast(0)
+                            val downloaded = status.totalDone().coerceAtLeast(0L)
+                            val total = if (status.totalWanted() > 0) status.totalWanted() else -1L
+                            val hasMeta = status.hasMetadata()
+
+                            val now = System.currentTimeMillis()
+                            val dt = if (task.lastProgressTime > 0) (now - task.lastProgressTime) / 1000.0 else 1.0
+                            val delta = downloaded - task.lastDownloadedBytes
+                            val calcSpeed = if (dt > 0.3 && delta > 0) (delta / dt).toLong() else 0L
+                            val nativeSpeed = maxOf(status.downloadPayloadRate(), status.downloadRate()).toLong().coerceAtLeast(0L)
+                            val speed = maxOf(calcSpeed, nativeSpeed)
+
+                            task.lastDownloadedBytes = downloaded
+                            task.lastProgressTime = now
+
+                            var newName: String? = null
+                            if (hasMeta) {
+                                val tf = runCatching { handle.torrentFile() }.getOrNull()
+                                val n = tf?.name()?.takeIf { it.isNotBlank() }
+                                    ?: runCatching { status.name() }.getOrNull()?.takeIf { it.isNotBlank() }
+                                if (!n.isNullOrBlank() && n != task.lastResolvedName && !n.startsWith("magnet:")) {
+                                    task.lastResolvedName = n
+                                    newName = n
+                                    task.callbacks?.onNameKnown?.invoke(n)
+                                }
+                            }
+
+                            task.callbacks?.onProgress?.invoke(
+                                Progress(
+                                    percent = percent,
+                                    speedBytesPerSec = speed,
+                                    seeders = seeders,
+                                    peers = peers,
+                                    downloadedBytes = downloaded,
+                                    totalBytes = total,
+                                    hasMetadata = hasMeta,
+                                    resolvedName = newName
+                                )
+                            )
+
+                            val state = status.state()
+                            if (percent >= 100 || state == TorrentStatus.State.FINISHED || state == TorrentStatus.State.SEEDING) {
+                                if (task.isFinished.compareAndSet(false, true)) {
+                                    task.callbacks?.onProgress?.invoke(
+                                        Progress(
+                                            percent = 100,
+                                            speedBytesPerSec = 0L,
+                                            seeders = seeders,
+                                            peers = peers,
+                                            downloadedBytes = if (total > 0) total else downloaded,
+                                            totalBytes = total,
+                                            hasMetadata = true,
+                                            resolvedName = newName
+                                        )
+                                    )
+                                    task.callbacks?.onDone?.invoke()
+                                    tasks.remove(task.id)
+                                }
+                            }
+                        } catch (_: Exception) {
+                            // Temporary handle state transitions
+                        }
+                    }
+
                     try {
                         Thread.sleep(1000)
                     } catch (_: InterruptedException) {
                         break
                     }
                 }
-            }.also { it.isDaemon = true; it.start() }
-        }
-
-        if (myHandle != null) {
-            handles[id] = myHandle
-            startPolling(myHandle)
-        }
-
-        val listener = object : AlertListener {
-            override fun types(): IntArray? = null
-
-            override fun alert(alert: Alert<*>) {
-                if (finished.get() || stopped.get()) return
-
-                when (alert.type()) {
-                    AlertType.ADD_TORRENT -> {
-                        val addAlert = alert as? AddTorrentAlert ?: return
-                        val handle = addAlert.handle()
-                        val handleHash = runCatching { handle.infoHash().toHex().lowercase() }.getOrNull()
-
-                        val matches = if (!targetHash.isNullOrBlank()) {
-                            targetHash.equals(handleHash, ignoreCase = true)
-                        } else {
-                            myHandle == null
-                        }
-
-                        if (matches && myHandle == null) {
-                            myHandle = handle
-                            handles[id] = handle
-                            handle.resume()
-                            startPolling(handle)
-                        }
-                    }
-                    AlertType.METADATA_RECEIVED -> {
-                        val metaAlert = alert as? MetadataReceivedAlert
-                        val handle = metaAlert?.handle()
-                        val handleHash = runCatching { handle?.infoHash()?.toHex()?.lowercase() }.getOrNull()
-                        if (handle != null && (targetHash.isNullOrBlank() || targetHash.equals(handleHash, ignoreCase = true))) {
-                            val tf = runCatching { handle.torrentFile() }.getOrNull()
-                            val name = tf?.name()?.takeIf { it.isNotBlank() }
-                                ?: runCatching { handle.status().name() }.getOrNull()?.takeIf { it.isNotBlank() }
-                            if (!name.isNullOrBlank() && !name.startsWith("magnet:")) {
-                                onNameKnown(name)
-                            }
-                        }
-                    }
-                    AlertType.TORRENT_FINISHED -> {
-                        val torrentAlert = alert as? TorrentFinishedAlert
-                        val handle = torrentAlert?.handle()
-                        val handleHash = runCatching { handle?.infoHash()?.toHex()?.lowercase() }.getOrNull()
-                        if (handle != null && (targetHash.isNullOrBlank() || targetHash.equals(handleHash, ignoreCase = true))) {
-                            if (finished.compareAndSet(false, true)) {
-                                onDone()
-                                handles.remove(id)
-                                stopFlags.remove(id)
-                                session.removeListener(this)
-                            }
-                        }
-                    }
-                    AlertType.TORRENT_ERROR -> {
-                        val errAlert = alert as? TorrentErrorAlert
-                        val handle = errAlert?.handle()
-                        val handleHash = runCatching { handle?.infoHash()?.toHex()?.lowercase() }.getOrNull()
-                        if (handle != null && (targetHash.isNullOrBlank() || targetHash.equals(handleHash, ignoreCase = true))) {
-                            if (finished.compareAndSet(false, true)) {
-                                val errorMsg = errAlert.message() ?: "Torrent error occurred"
-                                onError(errorMsg)
-                                handles.remove(id)
-                                stopFlags.remove(id)
-                                session.removeListener(this)
-                            }
-                        }
-                    }
-                    else -> {}
-                }
+            }, "TorrentEngine-Polling").apply {
+                isDaemon = true
+                start()
             }
         }
-
-        session.addListener(listener)
     }
 }

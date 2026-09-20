@@ -4,7 +4,7 @@
 
 An Android download manager built with Kotlin + Jetpack Compose. Multi-threaded direct-link downloads, a Liquid Glass UI, and no social-media video extraction.
 
-Version **3.1.0 · Minor Upgrade With Torrents**
+Version **3.2.0 · BitTorrent Engine Update**
 
 ## Features
 

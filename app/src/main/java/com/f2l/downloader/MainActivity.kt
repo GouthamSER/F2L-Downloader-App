@@ -678,8 +678,17 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             if (item.status == DownloadItem.Status.DOWNLOADING) {
                 Spacer(Modifier.height(4.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    val speedText = if (item.speedBytesPerSec > 0) {
+                        "${formatBytes(item.speedBytesPerSec)}/s"
+                    } else if (item.isTorrent && item.totalBytes <= 0) {
+                        "Connecting…"
+                    } else if (item.downloadedBytes > 0) {
+                        "0 B/s"
+                    } else {
+                        "Calculating speed…"
+                    }
                     Text(
-                        if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else "Calculating speed…",
+                        speedText,
                         color = TextSecondary, style = MaterialTheme.typography.labelSmall
                     )
                     Text(
@@ -1127,7 +1136,16 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
                         } else "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
                     )
                     if (item.status == DownloadItem.Status.DOWNLOADING) {
-                        DetailRow(stringResource(R.string.detail_speed), if (item.speedBytesPerSec > 0) "${formatBytes(item.speedBytesPerSec)}/s" else stringResource(R.string.calculating))
+                        val detailSpeedText = if (item.speedBytesPerSec > 0) {
+                            "${formatBytes(item.speedBytesPerSec)}/s"
+                        } else if (item.isTorrent && item.totalBytes <= 0) {
+                            "Connecting…"
+                        } else if (item.downloadedBytes > 0) {
+                            "0 B/s"
+                        } else {
+                            stringResource(R.string.calculating)
+                        }
+                        DetailRow(stringResource(R.string.detail_speed), detailSpeedText)
                         if (item.isTorrent) {
                             DetailRow("Seeders / Peers", "${item.seeders} seeders · ${item.peers} peers")
                             if (item.etaSeconds > 0) {
