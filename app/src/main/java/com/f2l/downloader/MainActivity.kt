@@ -781,6 +781,9 @@ private fun AddDownloadScreen(
     var connections by remember { mutableIntStateOf(defaultConnections) }
     var autoStart by remember { mutableStateOf(true) }
     var connectionsExpanded by remember { mutableStateOf(false) }
+    var isAddingTorrent by remember { mutableStateOf(false) }
+    var addedTorrentName by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
     val context = LocalContext.current
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -798,8 +801,14 @@ private fun AddDownloadScreen(
                 val parsedName = TorrentEngine.getTorrentName(bytes)
                 val fallbackName = uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
                     ?: "torrent-${System.currentTimeMillis()}.torrent"
-                vm.addTorrentFile(bytes, parsedName ?: fallbackName)
-                onBack()
+                val finalName = parsedName ?: fallbackName
+                vm.addTorrentFile(bytes, finalName)
+                addedTorrentName = finalName
+                isAddingTorrent = true
+                coroutineScope.launch {
+                    delay(2500)
+                    onBack()
+                }
             }
         }
     }
@@ -821,6 +830,23 @@ private fun AddDownloadScreen(
         }
     ) { pad ->
         Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
+            if (isAddingTorrent) {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = AccentBlue.copy(alpha = 0.18f)),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)
+                ) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(color = AccentBlue, modifier = Modifier.size(24.dp), strokeWidth = 2.5.dp)
+                        Spacer(Modifier.width(14.dp))
+                        Column {
+                            Text("Torrent file added!", color = TextPrimary, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+                            Text(addedTorrentName ?: "Connecting to swarm…", color = TextSecondary, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                            Text("Returning to home in 2s…", color = AccentBlue, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+            }
             Text("URL or magnet link", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
             OutlinedTextField(
@@ -834,7 +860,11 @@ private fun AddDownloadScreen(
             }
             Spacer(Modifier.height(16.dp))
 
-            OutlinedButton(onClick = { torrentPicker.launch(arrayOf("application/x-bittorrent", "application/octet-stream", "*/*")) }, modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(
+                onClick = { torrentPicker.launch(arrayOf("application/x-bittorrent", "application/octet-stream", "*/*")) },
+                enabled = !isAddingTorrent,
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Icon(Icons.Default.FolderZip, null, tint = TextPrimary)
                 Spacer(Modifier.width(8.dp))
                 Text("Or pick a .torrent file", color = TextPrimary)

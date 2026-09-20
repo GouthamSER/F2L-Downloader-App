@@ -4,7 +4,9 @@ import android.content.Context
 import android.os.Build
 import android.os.Environment
 import org.libtorrent4j.AlertListener
+import org.libtorrent4j.AnnounceEntry
 import org.libtorrent4j.SessionManager
+import org.libtorrent4j.SettingsPack
 import org.libtorrent4j.Sha1Hash
 import org.libtorrent4j.TorrentHandle
 import org.libtorrent4j.TorrentInfo
@@ -17,6 +19,7 @@ import org.libtorrent4j.alerts.TorrentErrorAlert
 import org.libtorrent4j.alerts.TorrentFinishedAlert
 import org.libtorrent4j.swig.error_code
 import org.libtorrent4j.swig.libtorrent
+import org.libtorrent4j.swig.settings_pack
 import org.libtorrent4j.swig.torrent_flags_t
 import java.io.File
 import java.net.URLDecoder
@@ -63,6 +66,56 @@ object TorrentEngine {
 
     private val tasks = ConcurrentHashMap<Long, TorrentTask>()
 
+    // Comprehensive high-performance Tier 1 UDP & HTTP public trackers
+    val PUBLIC_TRACKERS = listOf(
+        // High-speed UDP Trackers
+        "udp://tracker.opentrackr.org:1337/announce",
+        "udp://open.stealth.si:80/announce",
+        "udp://tracker.torrent.eu.org:451/announce",
+        "udp://explodie.org:6969/announce",
+        "udp://tracker.openbittorrent.com:6969/announce",
+        "udp://tracker.moeking.me:6969/announce",
+        "udp://p4p.arenabg.com:1337/announce",
+        "udp://tracker.cyberia.is:6969/announce",
+        "udp://tracker.dler.org:6969/announce",
+        "udp://tracker.bittor.pw:1337/announce",
+        "udp://retracker.lanta-net.ru:2710/announce",
+        "udp://tracker.tiny-vps.com:6969/announce",
+        "udp://bt2.archive.org:6969/announce",
+        "udp://bt1.archive.org:6969/announce",
+        "udp://tracker.theoks.net:6969/announce",
+        "udp://tracker-udp.gbitt.info:80/announce",
+        "udp://movies.zsw.ca:6969/announce",
+        "udp://open.demonii.com:1337/announce",
+        "udp://exodus.desync.com:6969/announce",
+        "udp://ipv4.tracker.harry.lu:80/announce",
+        "udp://tracker.coppersurfer.tk:6969/announce",
+        "udp://9.rarbg.to:2710/announce",
+        "udp://9.rarbg.me:2710/announce",
+        "udp://tracker.zerobytes.xyz:1337/announce",
+        "udp://tracker.altrosky.nl:6969/announce",
+        "udp://tracker.t-rb.org:6969/announce",
+        "udp://tracker1.bt.moack.co.kr:80/announce",
+        "udp://tracker.dump.cl:6969/announce",
+        // HTTP / HTTPS Trackers
+        "http://tracker.openbittorrent.com:80/announce",
+        "http://tracker.opentrackr.org:1337/announce",
+        "https://tracker.tamersunion.org:443/announce",
+        "http://tracker.dler.org:6969/announce",
+        "https://tracker.nanoha.org:443/announce",
+        "http://tracker.renfei.net:8080/announce"
+    )
+
+    fun injectTrackers(handle: TorrentHandle) {
+        runCatching {
+            for (tr in PUBLIC_TRACKERS) {
+                runCatching { handle.addTracker(AnnounceEntry(tr)) }
+            }
+            runCatching { handle.forceReannounce() }
+            runCatching { handle.forceDhtAnnounce() }
+        }
+    }
+
     private val globalAlertListener = object : AlertListener {
         override fun types(): IntArray? = null
 
@@ -89,6 +142,7 @@ object TorrentEngine {
                             runCatching { handle.pause() }
                         } else {
                             runCatching { handle.resume() }
+                            injectTrackers(handle)
                         }
                         ensurePolling()
                     }
@@ -103,6 +157,7 @@ object TorrentEngine {
                     }
                     if (task != null) {
                         task.handle = handle
+                        injectTrackers(handle)
                         val tf = runCatching { handle.torrentFile() }.getOrNull()
                         val name = tf?.name()?.takeIf { it.isNotBlank() }
                             ?: runCatching { handle.status().name() }.getOrNull()?.takeIf { it.isNotBlank() }
@@ -159,21 +214,21 @@ object TorrentEngine {
 
     private val session: SessionManager by lazy {
         SessionManager().also { sm ->
+            runCatching {
+                val sp = SettingsPack()
+                runCatching { sp.setEnableDht(true) }
+                runCatching {
+                    sp.setString(
+                        settings_pack.string_types.dht_bootstrap_nodes.swigValue(),
+                        "router.bittorrent.com:6881,dht.transmissionbt.com:6881,router.utorrent.com:6881,dht.libtorrent.org:25401,dht.aelitis.com:6881"
+                    )
+                }
+                sm.applySettings(sp)
+            }
             sm.addListener(globalAlertListener)
             sm.start()
         }
     }
-
-    // Tier 1 reliable public trackers to accelerate swarm discovery
-    val PUBLIC_TRACKERS = listOf(
-        "udp://tracker.opentrackr.org:1337/announce",
-        "udp://open.stealth.si:80/announce",
-        "udp://tracker.torrent.eu.org:451/announce",
-        "udp://explodie.org:6969/announce",
-        "udp://tracker.openbittorrent.com:6969/announce",
-        "udp://tracker.moeking.me:6969/announce",
-        "http://tracker.openbittorrent.com:80/announce"
-    )
 
     /**
      * Appends public trackers to a magnet URI if not already present.
@@ -302,6 +357,7 @@ object TorrentEngine {
                 if (existing != null && existing.isValid) {
                     task.handle = existing
                     existing.resume()
+                    injectTrackers(existing)
                     ensurePolling()
                     return@Thread
                 }
@@ -350,6 +406,7 @@ object TorrentEngine {
                 if (existing != null && existing.isValid) {
                     task.handle = existing
                     existing.resume()
+                    injectTrackers(existing)
                     ensurePolling()
                     return@Thread
                 }
@@ -393,11 +450,13 @@ object TorrentEngine {
             val handle = task.handle
             if (handle != null && handle.isValid) {
                 runCatching { handle.resume() }
+                injectTrackers(handle)
             } else if (!task.targetHash.isNullOrBlank()) {
                 val found = findHandle(task.targetHash!!)
                 if (found != null && found.isValid) {
                     task.handle = found
                     runCatching { found.resume() }
+                    injectTrackers(found)
                 }
             }
             ensurePolling()
