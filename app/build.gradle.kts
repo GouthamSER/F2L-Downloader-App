@@ -50,20 +50,6 @@ dependencies {
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
-
-    // BitTorrent (magnet links + .torrent files) — real native libtorrent bindings.
-    // Tried "bt" (bt-core) first: Guice-based, hits Class.getAnnotatedSuperclass() which
-    // Android's ART doesn't implement — not fixable from app code.
-    // Tried com.frostwire:jlibtorrent next: same underlying library, but its distribution
-    // host (dl.frostwire.com/maven) is dead — redirects to a 404 marketing page.
-    // org.libtorrent4j is the same author's actively-maintained republish of the same
-    // codebase, sitting directly on real Maven Central — no custom/unreliable repo needed.
-    val libtorrent4jVersion = "2.1.0-38"
-    implementation("org.libtorrent4j:libtorrent4j:$libtorrent4jVersion")
-    implementation("org.libtorrent4j:libtorrent4j-android-arm:$libtorrent4jVersion")
-    implementation("org.libtorrent4j:libtorrent4j-android-arm64:$libtorrent4jVersion")
-    implementation("org.libtorrent4j:libtorrent4j-android-x86:$libtorrent4jVersion")
-    implementation("org.libtorrent4j:libtorrent4j-android-x86_64:$libtorrent4jVersion")
     debugImplementation(platform("androidx.compose:compose-bom:2024.12.01"))
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

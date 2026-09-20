@@ -23,10 +23,7 @@ class DownloadRepository(context: Context) {
                         DownloadItem.Status.valueOf(o.optString("status", "QUEUED"))
                     }.getOrDefault(DownloadItem.Status.QUEUED),
                     error = o.optString("error", null),
-                    connections = o.optInt("connections", 8),
-                    isTorrent = o.optBoolean("isTorrent", false),
-                    peers = o.optInt("peers", 0),
-                    seeders = o.optInt("seeders", 0)
+                    connections = o.optInt("connections", 8)
                 ))
             }
         }
@@ -44,9 +41,6 @@ class DownloadRepository(context: Context) {
                 put("downloadedBytes", item.downloadedBytes)
                 put("status", item.status.name)
                 put("connections", item.connections)
-                put("isTorrent", item.isTorrent)
-                put("peers", item.peers)
-                put("seeders", item.seeders)
                 if (item.error != null) put("error", item.error)
             })
         }
