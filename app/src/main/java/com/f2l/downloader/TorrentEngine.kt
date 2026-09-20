@@ -6,7 +6,6 @@ import android.os.Environment
 import org.libtorrent4j.AlertListener
 import org.libtorrent4j.AnnounceEntry
 import org.libtorrent4j.SessionManager
-import org.libtorrent4j.SettingsPack
 import org.libtorrent4j.Sha1Hash
 import org.libtorrent4j.TorrentHandle
 import org.libtorrent4j.TorrentInfo
@@ -19,7 +18,6 @@ import org.libtorrent4j.alerts.TorrentErrorAlert
 import org.libtorrent4j.alerts.TorrentFinishedAlert
 import org.libtorrent4j.swig.error_code
 import org.libtorrent4j.swig.libtorrent
-import org.libtorrent4j.swig.settings_pack
 import org.libtorrent4j.swig.torrent_flags_t
 import java.io.File
 import java.net.URLDecoder
@@ -107,13 +105,16 @@ object TorrentEngine {
     )
 
     fun injectTrackers(handle: TorrentHandle) {
-        runCatching {
+        try {
             for (tr in PUBLIC_TRACKERS) {
-                runCatching { handle.addTracker(AnnounceEntry(tr)) }
+                try {
+                    handle.addTracker(AnnounceEntry(tr))
+                } catch (_: Throwable) {}
             }
-            runCatching { handle.forceReannounce() }
-            runCatching { handle.forceDhtAnnounce() }
-        }
+            try {
+                handle.forceReannounce()
+            } catch (_: Throwable) {}
+        } catch (_: Throwable) {}
     }
 
     private val globalAlertListener = object : AlertListener {
@@ -214,17 +215,6 @@ object TorrentEngine {
 
     private val session: SessionManager by lazy {
         SessionManager().also { sm ->
-            runCatching {
-                val sp = SettingsPack()
-                runCatching { sp.setEnableDht(true) }
-                runCatching {
-                    sp.setString(
-                        settings_pack.string_types.dht_bootstrap_nodes.swigValue(),
-                        "router.bittorrent.com:6881,dht.transmissionbt.com:6881,router.utorrent.com:6881,dht.libtorrent.org:25401,dht.aelitis.com:6881"
-                    )
-                }
-                sm.applySettings(sp)
-            }
             sm.addListener(globalAlertListener)
             sm.start()
         }
