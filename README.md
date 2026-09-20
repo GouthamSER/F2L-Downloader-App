@@ -4,6 +4,8 @@
 
 An Android download manager built with Kotlin + Jetpack Compose. Multi-threaded direct-link downloads, a Liquid Glass UI, and no social-media video extraction.
 
+<a href="https://github.com/GouthamSER/F2L-Downloader-App/releases/download/F2L-Downloader-Apk/app-debug.apk">Download Me :)</a>
+
 Version **3.2.0**
 
 ## Features
