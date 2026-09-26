@@ -22,8 +22,13 @@ class DownloadRepository(context: Context) {
                     status = runCatching {
                         DownloadItem.Status.valueOf(o.optString("status", "QUEUED"))
                     }.getOrDefault(DownloadItem.Status.QUEUED),
-                    error = o.optString("error", null),
-                    connections = o.optInt("connections", 8)
+                    error = if (o.has("error") && !o.isNull("error")) o.getString("error") else null,
+                    connections = o.optInt("connections", 8),
+                    userAgent = if (o.has("userAgent") && !o.isNull("userAgent")) o.getString("userAgent") else null,
+                    referer = if (o.has("referer") && !o.isNull("referer")) o.getString("referer") else null,
+                    customHeaders = if (o.has("customHeaders") && !o.isNull("customHeaders")) o.getString("customHeaders") else null,
+                    isTorrent = o.optBoolean("isTorrent", false),
+                    magnetHash = if (o.has("magnetHash") && !o.isNull("magnetHash")) o.getString("magnetHash") else null
                 ))
             }
         }
@@ -42,6 +47,11 @@ class DownloadRepository(context: Context) {
                 put("status", item.status.name)
                 put("connections", item.connections)
                 if (item.error != null) put("error", item.error)
+                if (item.userAgent != null) put("userAgent", item.userAgent)
+                if (item.referer != null) put("referer", item.referer)
+                if (item.customHeaders != null) put("customHeaders", item.customHeaders)
+                if (item.isTorrent) put("isTorrent", true)
+                if (item.magnetHash != null) put("magnetHash", item.magnetHash)
             })
         }
         prefs.edit().putString("items", a.toString()).apply()

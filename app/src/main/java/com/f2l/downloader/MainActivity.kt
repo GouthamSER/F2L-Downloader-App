@@ -15,6 +15,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
@@ -37,10 +38,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
@@ -54,7 +61,6 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 // ---- palette matching the reference design (deep navy + blue accent) ----
-// mutable so a theme-mode change (see applyPalette) can flip every screen at once via recreate()
 private var BgDark = Color(0xFF0B0D12)
 private var Surface1 = Color(0xFF121722)
 private var Surface2 = Color(0xFF171D2B)
@@ -64,6 +70,7 @@ private var TextSecondary = Color(0xFF8B93A7)
 private val GreenOk = Color(0xFF33C481)
 private val AmberWarn = Color(0xFFF2A93B)
 private val RedErr = Color(0xFFE0554F)
+private val PurpleMagnet = Color(0xFFA855F7)
 private var isLightMode = false
 
 private fun applyPalette(mode: String) {
@@ -131,7 +138,6 @@ private fun blurEffect(radiusPx: Float): androidx.compose.ui.graphics.RenderEffe
             .asComposeRenderEffect()
     } else null
 
-/** Frosted-glass surface: translucent tint + soft border + rounded corners. Layer glass panels over GlassBackground. */
 private fun Modifier.glass(radius: androidx.compose.ui.unit.Dp = 20.dp): Modifier {
     val tint = if (isLightMode) Color.White.copy(alpha = 0.55f) else Color.White.copy(alpha = 0.08f)
     val border = if (isLightMode) Color.White.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.18f)
@@ -182,9 +188,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         applyPalette(SettingsRepository(application).themeMode)
-        if (intent?.action == Intent.ACTION_SEND) incomingUrl = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
-        // Registered for the whole process lifetime (not just onStart/onStop) so progress/completion
-        // from the background DownloadService still lands while the app is backgrounded, not just visible.
+        if (intent?.action == Intent.ACTION_SEND) {
+            incomingUrl = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+        } else if (intent?.action == Intent.ACTION_VIEW) {
+            incomingUrl = intent.dataString?.trim().orEmpty()
+        }
         val filter = IntentFilter().apply {
             addAction(DownloadService.ACTION_PROGRESS)
             addAction(DownloadService.ACTION_FINISHED)
@@ -241,8 +249,30 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
             defaultConnections = vm.settings.defaultConnections,
             defaultFolder = vm.settings.defaultFolderUri?.let { runCatching { Uri.parse(it) }.getOrNull() },
             onBack = { showAddScreen = false },
-            onStart = { url, name, folder, connections, autoStart ->
-                vm.add(url, folder, name, connections, autoStart)
+            onStart = { url, name, folder, connections, autoStart, userAgent, referer, customHeaders ->
+                vm.add(
+                    url = url,
+                    folder = folder,
+                    fileName = name.takeIf { it.isNotBlank() },
+                    connections = connections,
+                    autoStart = autoStart,
+                    userAgent = userAgent,
+                    referer = referer,
+                    customHeaders = customHeaders
+                )
+                showAddScreen = false
+                tab = Tab.HOME
+            },
+            onBatchStart = { urls, folder, connections, autoStart, userAgent, referer, customHeaders ->
+                vm.addBatch(
+                    urls = urls,
+                    folder = folder,
+                    connections = connections,
+                    autoStart = autoStart,
+                    userAgent = userAgent,
+                    referer = referer,
+                    customHeaders = customHeaders
+                )
                 showAddScreen = false
                 tab = Tab.HOME
             }
@@ -316,14 +346,16 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
 @Composable
 private fun OnboardingScreen(onDone: (Uri?) -> Unit) {
     val context = LocalContext.current
-    var step by remember { mutableStateOf(0) } // 0 = notifications, 1 = storage
+    var step by remember { mutableStateOf(0) }
 
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { step = 1 }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
-            context.contentResolver.takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
         }
         onDone(uri)
     }
@@ -438,8 +470,10 @@ private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
 }
 
 private fun resolveContentUri(context: android.content.Context, item: DownloadItem): Uri? {
-    val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(item.folderUri))
-    return tree?.findFile(item.fileName)?.takeIf { it.exists() }?.uri
+    return runCatching {
+        val tree = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, Uri.parse(item.folderUri))
+        tree?.findFile(item.fileName)?.takeIf { it.exists() }?.uri
+    }.getOrNull()
 }
 
 private fun shareDownloadedFile(context: android.content.Context, item: DownloadItem) {
@@ -450,14 +484,20 @@ private fun shareDownloadedFile(context: android.content.Context, item: Download
             return
         }
         val ext = item.fileName.substringAfterLast('.', "").lowercase()
-        val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-            ?: context.contentResolver.getType(uri) ?: "*/*"
+        val mime = when (ext) {
+            "torrent" -> "application/x-bittorrent"
+            else -> android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+                ?: context.contentResolver.getType(uri)
+                ?: "*/*"
+        }
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = mime
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(Intent.createChooser(intent, "Share ${item.fileName}"))
+    } catch (e: SecurityException) {
+        android.widget.Toast.makeText(context, "Storage permission issue. Check app folder access.", android.widget.Toast.LENGTH_LONG).show()
     } catch (e: Exception) {
         android.widget.Toast.makeText(context, "Couldn't share this file", android.widget.Toast.LENGTH_SHORT).show()
     }
@@ -470,22 +510,120 @@ private fun openDownloadedFile(context: android.content.Context, item: DownloadI
             android.widget.Toast.makeText(context, "File not found — it may have been moved or deleted", android.widget.Toast.LENGTH_SHORT).show()
             return
         }
-        // Extension-based lookup first: every file is created with a generic
-        // "application/octet-stream" mime at download time, so contentResolver.getType()
-        // always returns that non-null generic value and the extension fallback below it
-        // would never run if checked second — that was the actual bug stopping files opening.
         val ext = item.fileName.substringAfterLast('.', "").lowercase()
-        val mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-            ?: context.contentResolver.getType(uri)
-            ?: "*/*"
+        val mime = when (ext) {
+            "torrent" -> "application/x-bittorrent"
+            "magnet" -> "text/plain"
+            else -> android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+                ?: context.contentResolver.getType(uri)
+                ?: "*/*"
+        }
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, mime)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         context.startActivity(intent)
-    } catch (e: Exception) {
+    } catch (e: SecurityException) {
+        android.widget.Toast.makeText(context, "Storage permission revoked. Please re-pick download folder.", android.widget.Toast.LENGTH_LONG).show()
+    } catch (e: ActivityNotFoundException) {
         android.widget.Toast.makeText(context, "No app found to open this file", android.widget.Toast.LENGTH_SHORT).show()
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "Couldn't open file: ${e.localizedMessage ?: "Unknown error"}", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** Real-time download speed bandwidth chart with glowing gradient and smooth cubic Bézier curves */
+@Composable
+private fun SpeedGraph(
+    history: List<Long>,
+    modifier: Modifier = Modifier,
+    lineColor: Color = AccentBlue,
+    fillAlpha: Float = 0.3f
+) {
+    if (history.isEmpty()) return
+
+    val maxSpeed = (history.maxOrNull() ?: 0L).coerceAtLeast(1024L)
+    val points = remember(history) {
+        if (history.size < 2) listOf(0L) + history else history
+    }
+
+    Box(modifier) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val width = size.width
+            val height = size.height
+            if (width <= 0 || height <= 0 || points.size < 2) return@Canvas
+
+            // Subtle horizontal grid lines (25%, 50%, 75%)
+            val gridColor = Color.White.copy(alpha = 0.08f)
+            listOf(0.25f, 0.5f, 0.75f).forEach { fraction ->
+                val y = height * (1f - fraction)
+                drawLine(
+                    color = gridColor,
+                    start = Offset(0f, y),
+                    end = Offset(width, y),
+                    strokeWidth = 1.dp.toPx()
+                )
+            }
+
+            val stepX = width / (points.size - 1)
+            val strokePath = Path()
+            val fillPath = Path()
+
+            val y0 = height * (1f - (points[0].toFloat() / maxSpeed).coerceIn(0.02f, 0.98f))
+            strokePath.moveTo(0f, y0)
+            fillPath.moveTo(0f, height)
+            fillPath.lineTo(0f, y0)
+
+            for (i in 0 until points.size - 1) {
+                val x0 = i * stepX
+                val p0 = points[i].toFloat()
+                val curY = height * (1f - (p0 / maxSpeed).coerceIn(0.02f, 0.98f))
+
+                val x1 = (i + 1) * stepX
+                val p1 = points[i + 1].toFloat()
+                val nextY = height * (1f - (p1 / maxSpeed).coerceIn(0.02f, 0.98f))
+
+                val cx = (x0 + x1) / 2f
+                strokePath.cubicTo(cx, curY, cx, nextY, x1, nextY)
+                fillPath.cubicTo(cx, curY, cx, nextY, x1, nextY)
+            }
+
+            fillPath.lineTo(width, height)
+            fillPath.close()
+
+            // Vertical gradient fill
+            drawPath(
+                path = fillPath,
+                brush = Brush.verticalGradient(
+                    listOf(lineColor.copy(alpha = fillAlpha), Color.Transparent)
+                )
+            )
+
+            // Neon stroke line
+            drawPath(
+                path = strokePath,
+                color = lineColor,
+                style = Stroke(
+                    width = 2.5.dp.toPx(),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round
+                )
+            )
+
+            // Indicator dot at the latest point
+            val lastY = height * (1f - (points.last().toFloat() / maxSpeed).coerceIn(0.02f, 0.98f))
+            drawCircle(
+                color = lineColor.copy(alpha = 0.35f),
+                radius = 6.dp.toPx(),
+                center = Offset(width, lastY)
+            )
+            drawCircle(
+                color = lineColor,
+                radius = 3.dp.toPx(),
+                center = Offset(width, lastY)
+            )
+        }
     }
 }
 
@@ -601,7 +739,13 @@ private fun F2LProgressBar(progress: Float, color: Color, height: androidx.compo
 }
 
 @Composable
-private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onClick: () -> Unit) {
+private fun DownloadCard(
+    item: DownloadItem,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onDelete: () -> Unit,
+    onClick: () -> Unit
+) {
     val progress = if (item.totalBytes > 0)
         (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
 
@@ -622,16 +766,46 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
         Column(Modifier.padding(14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(
-                    Modifier.size(38.dp).clip(RoundedCornerShape(10.dp)).background(statusColor.copy(alpha = 0.18f)),
+                    Modifier.size(38.dp).clip(RoundedCornerShape(10.dp)).background(
+                        if (item.isTorrent) PurpleMagnet.copy(alpha = 0.22f) else statusColor.copy(alpha = 0.18f)
+                    ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(fileTypeIcon(item.fileName), null, tint = statusColor, modifier = Modifier.size(20.dp))
+                    Icon(
+                        if (item.isTorrent) Icons.Default.CloudDownload else fileTypeIcon(item.fileName),
+                        null,
+                        tint = if (item.isTorrent) PurpleMagnet else statusColor,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text(item.fileName, color = TextPrimary, style = MaterialTheme.typography.titleSmall, maxLines = 1, modifier = Modifier.basicMarquee())
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            item.fileName,
+                            color = TextPrimary,
+                            style = MaterialTheme.typography.titleSmall,
+                            maxLines = 1,
+                            modifier = Modifier.basicMarquee().weight(1f, fill = false)
+                        )
+                        if (item.isTorrent) {
+                            Spacer(Modifier.width(6.dp))
+                            Surface(
+                                color = PurpleMagnet.copy(alpha = 0.2f),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    "MAGNET",
+                                    color = PurpleMagnet,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
                     Text(
-                        "${formatBytes(item.totalBytes)} · ${item.connections} threads",
+                        "${formatBytes(item.totalBytes)} · ${if (item.isTorrent) "BitTorrent" else "${item.connections} threads"}",
                         color = TextSecondary, style = MaterialTheme.typography.labelSmall
                     )
                 }
@@ -639,6 +813,18 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             }
             Spacer(Modifier.height(10.dp))
             F2LProgressBar(progress = progress, color = statusColor, height = 8.dp)
+
+            // Real-time speed graph sparkline inside card when downloading
+            if (item.status == DownloadItem.Status.DOWNLOADING && item.speedHistory.size >= 2) {
+                Spacer(Modifier.height(8.dp))
+                SpeedGraph(
+                    history = item.speedHistory,
+                    modifier = Modifier.fillMaxWidth().height(38.dp),
+                    lineColor = statusColor,
+                    fillAlpha = 0.25f
+                )
+            }
+
             Spacer(Modifier.height(6.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
@@ -657,10 +843,7 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
                     } else {
                         "Calculating speed…"
                     }
-                    Text(
-                        speedText,
-                        color = TextSecondary, style = MaterialTheme.typography.labelSmall
-                    )
+                    Text(speedText, color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                     Text(
                         if (item.etaSeconds > 0) "ETA ${formatDuration(item.etaSeconds)}" else "",
                         color = TextSecondary, style = MaterialTheme.typography.labelSmall
@@ -669,19 +852,23 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
             }
             if (item.error != null) {
                 Spacer(Modifier.height(4.dp))
-                Text(item.error!!, color = RedErr, style = MaterialTheme.typography.labelSmall)
+                Text(item.error, color = RedErr, style = MaterialTheme.typography.labelSmall)
             }
             when (item.status) {
                 DownloadItem.Status.DOWNLOADING -> {
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
+                        Icon(Icons.Default.Pause, null, tint = TextPrimary)
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.action_pause), color = TextPrimary)
                     }
                 }
                 DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> {
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = onResume, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)) {
-                        Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(if (item.status == DownloadItem.Status.FAILED) stringResource(R.string.action_retry) else stringResource(R.string.action_resume))
+                        Icon(Icons.Default.PlayArrow, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (item.status == DownloadItem.Status.FAILED) stringResource(R.string.action_retry) else stringResource(R.string.action_resume))
                     }
                 }
                 else -> {}
@@ -691,13 +878,14 @@ private fun DownloadCard(item: DownloadItem, onPause: () -> Unit, onResume: () -
 }
 
 private fun fileTypeIcon(name: String) = when (name.substringAfterLast('.', "").lowercase()) {
+    "torrent", "magnet" -> Icons.Default.CloudDownload
     "mp4", "mkv", "mov", "avi" -> Icons.Default.Movie
     "mp3", "wav", "flac" -> Icons.Default.MusicNote
     "jpg", "jpeg", "png", "webp" -> Icons.Default.Image
     "apk" -> Icons.Default.Android
-    "zip", "rar", "7z", "iso" -> Icons.Default.FolderZip
+    "zip", "rar", "7z", "iso", "tar", "gz" -> Icons.Default.FolderZip
     "pdf" -> Icons.Default.PictureAsPdf
-    "exe" -> Icons.Default.Terminal
+    "exe", "msi", "bat", "sh" -> Icons.Default.Terminal
     else -> Icons.Default.InsertDriveFile
 }
 
@@ -743,103 +931,391 @@ private fun AddDownloadScreen(
     defaultConnections: Int = 8,
     defaultFolder: Uri? = null,
     onBack: () -> Unit,
-    onStart: (url: String, name: String, folder: Uri, connections: Int, autoStart: Boolean) -> Unit
+    onStart: (url: String, name: String, folder: Uri, connections: Int, autoStart: Boolean, userAgent: String?, referer: String?, customHeaders: String?) -> Unit,
+    onBatchStart: (urls: List<String>, folder: Uri, connections: Int, autoStart: Boolean, userAgent: String?, referer: String?, customHeaders: String?) -> Unit
 ) {
+    var modeTab by remember { mutableIntStateOf(0) } // 0 = Single, 1 = Batch
     var url by remember { mutableStateOf(initialUrl) }
+    var batchText by remember { mutableStateOf("") }
     var fileName by remember { mutableStateOf("") }
     var folder by remember { mutableStateOf(defaultFolder) }
     var connections by remember { mutableIntStateOf(defaultConnections) }
     var autoStart by remember { mutableStateOf(true) }
     var connectionsExpanded by remember { mutableStateOf(false) }
 
+    // Advanced HTTP options
+    var showAdvancedHttp by remember { mutableStateOf(false) }
+    var selectedUaIndex by remember { mutableIntStateOf(0) }
+    var customUserAgent by remember { mutableStateOf("") }
+    var referer by remember { mutableStateOf("") }
+    var customHeaders by remember { mutableStateOf("") }
+    var uaMenuExpanded by remember { mutableStateOf(false) }
+
     val context = LocalContext.current
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+    val clipboardManager = LocalClipboardManager.current
+
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
-            context.contentResolver.takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
             folder = uri
         }
     }
 
-    val urlValid = url.startsWith("http://") || url.startsWith("https://")
-
-    GlassBackground {
-    Scaffold(
-        containerColor = Color.Transparent,
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.add_download_title)) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = TextPrimary),
-                navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) }
-                }
-            )
-        }
-    ) { pad ->
-        Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
-            Text(stringResource(R.string.label_url), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(4.dp))
-            OutlinedTextField(
-                value = url, onValueChange = { url = it },
-                modifier = Modifier.fillMaxWidth(), singleLine = true,
-                placeholder = { Text(stringResource(R.string.hint_url)) }
-            )
-            Spacer(Modifier.height(16.dp))
-
-            Text(stringResource(R.string.label_filename), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(4.dp))
-            OutlinedTextField(
-                value = fileName, onValueChange = { fileName = it },
-                modifier = Modifier.fillMaxWidth(), singleLine = true,
-                placeholder = { Text(stringResource(R.string.hint_filename)) }
-            )
-            Spacer(Modifier.height(16.dp))
-
-            Text(stringResource(R.string.label_save_to), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(4.dp))
-            OutlinedButton(onClick = { picker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Default.Folder, null, tint = TextPrimary)
-                Spacer(Modifier.width(8.dp))
-                Text(if (folder == null) stringResource(R.string.action_choose_folder) else stringResource(R.string.folder_selected), color = TextPrimary)
-            }
-            Spacer(Modifier.height(16.dp))
-
-            Text(stringResource(R.string.label_connections), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-            Spacer(Modifier.height(4.dp))
-            Box {
-                OutlinedButton(onClick = { connectionsExpanded = true }, modifier = Modifier.fillMaxWidth()) {
-                    Text("$connections threads" + if (connections == 8) " (recommended)" else "", color = TextPrimary, modifier = Modifier.weight(1f))
-                    Icon(Icons.Default.ArrowDropDown, null, tint = TextPrimary)
-                }
-                DropdownMenu(expanded = connectionsExpanded, onDismissRequest = { connectionsExpanded = false }) {
-                    listOf(2, 4, 6, 8, 16).forEach { n ->
-                        DropdownMenuItem(text = { Text("$n threads" + if (n == 8) " (recommended)" else "") }, onClick = { connections = n; connectionsExpanded = false })
-                    }
-                }
-            }
-            Text(stringResource(R.string.connections_hint), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-            Spacer(Modifier.height(16.dp))
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text(stringResource(R.string.label_start_immediately), color = TextPrimary)
-                Switch(
-                    checked = autoStart, onCheckedChange = { autoStart = it },
-                    colors = SwitchDefaults.colors(checkedTrackColor = AccentBlue)
-                )
-            }
-            Spacer(Modifier.height(24.dp))
-
-            Button(
-                onClick = { onStart(url.trim(), fileName, folder ?: Uri.EMPTY, connections, autoStart) },
-                enabled = urlValid && folder != null,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
-            ) {
-                Text(if (autoStart) stringResource(R.string.action_start_download) else stringResource(R.string.action_add_to_queue))
+    val fileImportPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+            }.getOrNull()?.let { content ->
+                batchText = if (batchText.isBlank()) content else "$batchText\n$content"
             }
         }
     }
+
+    val isMagnetUrl = remember(url) { DownloadEngine.isMagnet(url) }
+    val magnetInfo = remember(url) { if (isMagnetUrl) DownloadEngine.parseMagnetUri(url) else null }
+    val urlValid = isMagnetUrl || url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)
+
+    val extractedBatchUrls = remember(batchText) { vm.extractUrls(batchText) }
+
+    val uaPresets = listOf(
+        stringResource(R.string.ua_default) to "",
+        stringResource(R.string.ua_chrome_android) to "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        stringResource(R.string.ua_chrome_pc) to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        stringResource(R.string.ua_firefox_pc) to "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+        stringResource(R.string.ua_safari_mac) to "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+        stringResource(R.string.ua_custom) to "custom"
+    )
+
+    val effectiveUserAgent = when {
+        selectedUaIndex == uaPresets.lastIndex -> customUserAgent.trim().takeIf { it.isNotEmpty() }
+        selectedUaIndex > 0 -> uaPresets[selectedUaIndex].second
+        else -> null
+    }
+
+    GlassBackground {
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    title = { Text(stringResource(R.string.add_download_title)) },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = TextPrimary),
+                    navigationIcon = {
+                        IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) }
+                    }
+                )
+            }
+        ) { pad ->
+            Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
+                // Mode Selector Tabs (Single / Batch)
+                TabRow(
+                    selectedTabIndex = modeTab,
+                    containerColor = Color.Transparent,
+                    modifier = Modifier.fillMaxWidth().glass(radius = 16.dp)
+                ) {
+                    Tab(
+                        selected = modeTab == 0,
+                        onClick = { modeTab = 0 },
+                        text = { Text(stringResource(R.string.tab_single)) },
+                        selectedContentColor = AccentBlue,
+                        unselectedContentColor = TextSecondary
+                    )
+                    Tab(
+                        selected = modeTab == 1,
+                        onClick = { modeTab = 1 },
+                        text = { Text(stringResource(R.string.tab_batch)) },
+                        selectedContentColor = AccentBlue,
+                        unselectedContentColor = TextSecondary
+                    )
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                if (modeTab == 0) {
+                    // ---- SINGLE DOWNLOAD FORM ----
+                    Text(stringResource(R.string.label_url), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = url, onValueChange = { url = it },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        placeholder = { Text(stringResource(R.string.hint_url)) },
+                        trailingIcon = {
+                            if (url.isNotBlank()) {
+                                IconButton(onClick = { url = "" }) { Icon(Icons.Default.Clear, null, tint = TextSecondary) }
+                            }
+                        }
+                    )
+
+                    // Magnet link banner if detected
+                    if (isMagnetUrl && magnetInfo != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Card(
+                            modifier = Modifier.fillMaxWidth().glass(radius = 12.dp),
+                            colors = CardDefaults.cardColors(containerColor = PurpleMagnet.copy(alpha = 0.15f))
+                        ) {
+                            Column(Modifier.padding(12.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.CloudDownload, null, tint = PurpleMagnet, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(stringResource(R.string.magnet_detected), color = PurpleMagnet, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                }
+                                if (magnetInfo.displayName != null) {
+                                    Spacer(Modifier.height(4.dp))
+                                    Text("Name: ${magnetInfo.displayName}", color = TextPrimary, style = MaterialTheme.typography.bodySmall)
+                                }
+                                Spacer(Modifier.height(2.dp))
+                                Text(stringResource(R.string.torrent_hash, magnetInfo.infoHash), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                                if (magnetInfo.trackers.isNotEmpty()) {
+                                    Text(stringResource(R.string.torrent_trackers, magnetInfo.trackers.size), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(16.dp))
+
+                    Text(stringResource(R.string.label_filename), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = fileName, onValueChange = { fileName = it },
+                        modifier = Modifier.fillMaxWidth(), singleLine = true,
+                        placeholder = { Text(stringResource(R.string.hint_filename)) }
+                    )
+                } else {
+                    // ---- BATCH IMPORT FORM ----
+                    Text(stringResource(R.string.tab_batch), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = batchText,
+                        onValueChange = { batchText = it },
+                        modifier = Modifier.fillMaxWidth().height(140.dp),
+                        placeholder = { Text(stringResource(R.string.batch_input_hint)) }
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                val clip = clipboardManager.getText()?.text.orEmpty()
+                                if (clip.isNotBlank()) {
+                                    batchText = if (batchText.isBlank()) clip else "$batchText\n$clip"
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.ContentPaste, null, tint = TextPrimary, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.action_paste_clipboard), color = TextPrimary, style = MaterialTheme.typography.labelSmall)
+                        }
+
+                        OutlinedButton(
+                            onClick = { fileImportPicker.launch(arrayOf("text/*", "application/octet-stream", "*/*")) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.UploadFile, null, tint = TextPrimary, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Import file", color = TextPrimary, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+
+                    if (extractedBatchUrls.isNotEmpty()) {
+                        Spacer(Modifier.height(8.dp))
+                        Surface(
+                            color = GreenOk.copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                stringResource(R.string.batch_urls_found, extractedBatchUrls.size),
+                                color = GreenOk,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                // Save To Folder
+                Text(stringResource(R.string.label_save_to), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(4.dp))
+                OutlinedButton(onClick = { folderPicker.launch(null) }, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Folder, null, tint = TextPrimary)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (folder == null) stringResource(R.string.action_choose_folder) else stringResource(R.string.folder_selected), color = TextPrimary)
+                }
+                Spacer(Modifier.height(16.dp))
+
+                // Parallel Connections (disabled for magnet downloads)
+                if (!isMagnetUrl || modeTab == 1) {
+                    Text(stringResource(R.string.label_connections), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(4.dp))
+                    Box {
+                        OutlinedButton(onClick = { connectionsExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+                            Text("$connections threads" + if (connections == 8) " (recommended)" else "", color = TextPrimary, modifier = Modifier.weight(1f))
+                            Icon(Icons.Default.ArrowDropDown, null, tint = TextPrimary)
+                        }
+                        DropdownMenu(expanded = connectionsExpanded, onDismissRequest = { connectionsExpanded = false }) {
+                            listOf(2, 4, 6, 8, 16).forEach { n ->
+                                DropdownMenuItem(
+                                    text = { Text("$n threads" + if (n == 8) " (recommended)" else "") },
+                                    onClick = { connections = n; connectionsExpanded = false }
+                                )
+                            }
+                        }
+                    }
+                    Text(stringResource(R.string.connections_hint), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                    Spacer(Modifier.height(16.dp))
+                }
+
+                // ---- ADVANCED HTTP HEADERS ACCORDION ----
+                Card(
+                    modifier = Modifier.fillMaxWidth().glass(radius = 16.dp).clickable { showAdvancedHttp = !showAdvancedHttp },
+                    colors = CardDefaults.cardColors(containerColor = Color.Transparent)
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.Http, null, tint = AccentBlue, modifier = Modifier.size(20.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(stringResource(R.string.advanced_http_title), color = TextPrimary, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                            }
+                            Icon(
+                                if (showAdvancedHttp) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                null, tint = TextSecondary
+                            )
+                        }
+
+                        if (showAdvancedHttp) {
+                            Spacer(Modifier.height(12.dp))
+                            HorizontalDivider(color = Surface2)
+                            Spacer(Modifier.height(12.dp))
+
+                            // User-Agent selector
+                            Text(stringResource(R.string.label_user_agent), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                            Spacer(Modifier.height(4.dp))
+                            Box {
+                                OutlinedButton(onClick = { uaMenuExpanded = true }, modifier = Modifier.fillMaxWidth()) {
+                                    Text(uaPresets[selectedUaIndex].first, color = TextPrimary, modifier = Modifier.weight(1f))
+                                    Icon(Icons.Default.ArrowDropDown, null, tint = TextPrimary)
+                                }
+                                DropdownMenu(expanded = uaMenuExpanded, onDismissRequest = { uaMenuExpanded = false }) {
+                                    uaPresets.forEachIndexed { idx, (label, _) ->
+                                        DropdownMenuItem(
+                                            text = { Text(label) },
+                                            onClick = { selectedUaIndex = idx; uaMenuExpanded = false }
+                                        )
+                                    }
+                                }
+                            }
+
+                            if (selectedUaIndex == uaPresets.lastIndex) {
+                                Spacer(Modifier.height(8.dp))
+                                OutlinedTextField(
+                                    value = customUserAgent,
+                                    onValueChange = { customUserAgent = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true,
+                                    placeholder = { Text(stringResource(R.string.hint_user_agent)) }
+                                )
+                            }
+
+                            Spacer(Modifier.height(12.dp))
+
+                            // Referer
+                            Text(stringResource(R.string.label_referer), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                            Spacer(Modifier.height(4.dp))
+                            OutlinedTextField(
+                                value = referer,
+                                onValueChange = { referer = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                placeholder = { Text(stringResource(R.string.hint_referer)) }
+                            )
+
+                            Spacer(Modifier.height(12.dp))
+
+                            // Custom Headers / Cookies
+                            Text(stringResource(R.string.label_custom_headers), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                            Spacer(Modifier.height(4.dp))
+                            OutlinedTextField(
+                                value = customHeaders,
+                                onValueChange = { customHeaders = it },
+                                modifier = Modifier.fillMaxWidth().height(90.dp),
+                                placeholder = { Text(stringResource(R.string.hint_custom_headers)) }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                // Auto Start Switch
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.label_start_immediately), color = TextPrimary)
+                    Switch(
+                        checked = autoStart, onCheckedChange = { autoStart = it },
+                        colors = SwitchDefaults.colors(checkedTrackColor = AccentBlue)
+                    )
+                }
+
+                Spacer(Modifier.height(24.dp))
+
+                // Submit Button
+                if (modeTab == 0) {
+                    Button(
+                        onClick = {
+                            onStart(
+                                url.trim(),
+                                fileName,
+                                folder ?: Uri.EMPTY,
+                                connections,
+                                autoStart,
+                                effectiveUserAgent,
+                                referer.trim().takeIf { it.isNotBlank() },
+                                customHeaders.trim().takeIf { it.isNotBlank() }
+                            )
+                        },
+                        enabled = urlValid && folder != null,
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = if (isMagnetUrl) PurpleMagnet else AccentBlue)
+                    ) {
+                        Text(
+                            if (isMagnetUrl) "Download Magnet / Torrent"
+                            else if (autoStart) stringResource(R.string.action_start_download)
+                            else stringResource(R.string.action_add_to_queue)
+                        )
+                    }
+                } else {
+                    Button(
+                        onClick = {
+                            onBatchStart(
+                                extractedBatchUrls,
+                                folder ?: Uri.EMPTY,
+                                connections,
+                                autoStart,
+                                effectiveUserAgent,
+                                referer.trim().takeIf { it.isNotBlank() },
+                                customHeaders.trim().takeIf { it.isNotBlank() }
+                            )
+                        },
+                        enabled = extractedBatchUrls.isNotEmpty() && folder != null,
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                    ) {
+                        Text(
+                            if (autoStart) stringResource(R.string.batch_import_start, extractedBatchUrls.size)
+                            else stringResource(R.string.batch_import_queue, extractedBatchUrls.size)
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -862,9 +1338,11 @@ private fun SettingsScreen(vm: MainViewModel) {
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
-            context.contentResolver.takePersistableUriPermission(
-                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+            }
             settings.defaultFolderUri = uri.toString()
             defaultFolder = uri.toString()
         }
@@ -894,7 +1372,6 @@ private fun SettingsScreen(vm: MainViewModel) {
             SettingsRow(icon = Icons.Default.Folder, title = stringResource(R.string.row_download_folder), subtitle = folderLabel, onClick = { folderPicker.launch(null) })
             SettingsToggleRow(icon = Icons.Default.Wifi, title = stringResource(R.string.row_wifi_only), subtitle = stringResource(R.string.row_wifi_only_desc), checked = wifiOnly, onCheckedChange = { wifiOnly = it; settings.wifiOnly = it })
         }
-
 
         Spacer(Modifier.height(20.dp))
         SettingsSection(title = stringResource(R.string.section_general)) {
@@ -992,7 +1469,15 @@ private fun SettingsToggleRow(icon: androidx.compose.ui.graphics.vector.ImageVec
 }
 
 @Composable
-private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause: () -> Unit, onResume: () -> Unit, onDelete: () -> Unit, onOpen: () -> Unit, onShare: () -> Unit) {
+private fun DownloadDetailScreen(
+    item: DownloadItem,
+    onBack: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onDelete: () -> Unit,
+    onOpen: () -> Unit,
+    onShare: () -> Unit
+) {
     BackHandler(onBack = onBack)
     val progress = if (item.totalBytes > 0)
         (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
@@ -1006,87 +1491,166 @@ private fun DownloadDetailScreen(item: DownloadItem, onBack: () -> Unit, onPause
     }
 
     GlassBackground {
-    Scaffold(
-        containerColor = Color.Transparent,
-        topBar = {
-            TopAppBar(
-                title = { Text(item.fileName, maxLines = 1, modifier = Modifier.basicMarquee()) },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = TextPrimary),
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) } },
-                actions = { IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = RedErr) } }
-            )
-        }
-    ) { pad ->
-        Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
-            Box(
-                Modifier.fillMaxWidth().height(150.dp).glass(radius = 20.dp)
-                    .background(Brush.verticalGradient(listOf(statusColor.copy(alpha = 0.28f), Color.Transparent))),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Box(
-                        Modifier.size(52.dp).glass(radius = 16.dp)
-                            .background(statusColor.copy(alpha = 0.22f)),
-                        contentAlignment = Alignment.Center
-                    ) { Icon(fileTypeIcon(item.fileName), null, tint = statusColor, modifier = Modifier.size(26.dp)) }
-                    Spacer(Modifier.height(10.dp))
-                    Text("${(progress * 100).toInt()}%", color = TextPrimary, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                    Text(statusLabel, color = statusColor, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
-                }
+        Scaffold(
+            containerColor = Color.Transparent,
+            topBar = {
+                TopAppBar(
+                    title = { Text(item.fileName, maxLines = 1, modifier = Modifier.basicMarquee()) },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent, titleContentColor = TextPrimary),
+                    navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) } },
+                    actions = { IconButton(onClick = onDelete) { Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = RedErr) } }
+                )
             }
-            Spacer(Modifier.height(16.dp))
-            F2LProgressBar(progress = progress, color = statusColor, height = 10.dp)
-            Spacer(Modifier.height(20.dp))
-
-            Card(modifier = Modifier.fillMaxWidth().glass(radius = 20.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent), shape = RoundedCornerShape(16.dp)) {
-                Column(Modifier.padding(horizontal = 16.dp)) {
-                    DetailRow(
-                        stringResource(R.string.detail_downloaded),
-                        "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
-                    )
-                    if (item.status == DownloadItem.Status.DOWNLOADING) {
-                        val detailSpeedText = if (item.speedBytesPerSec > 0) {
-                            "${formatBytes(item.speedBytesPerSec)}/s"
-                        } else if (item.downloadedBytes > 0) {
-                            "0 B/s"
-                        } else {
-                            stringResource(R.string.calculating)
-                        }
-                        DetailRow(stringResource(R.string.detail_speed), detailSpeedText)
-                        DetailRow(stringResource(R.string.detail_eta), if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else stringResource(R.string.calculating))
-                    }
-                    DetailRow(stringResource(R.string.detail_connections), "${item.connections} threads")
-                    DetailRow(stringResource(R.string.detail_filename), item.fileName)
-                    DetailRow(stringResource(R.string.detail_save_folder), Uri.parse(item.folderUri).lastPathSegment ?: item.folderUri)
-                    DetailRow(stringResource(R.string.detail_source_url), item.url, isLast = item.error == null)
-                    if (item.error != null) DetailRow(stringResource(R.string.detail_error), item.error!!, RedErr, isLast = true)
-                }
-            }
-
-            Spacer(Modifier.height(24.dp))
-            when (item.status) {
-                DownloadItem.Status.DOWNLOADING -> OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
-                    Icon(Icons.Default.Pause, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_pause), color = TextPrimary)
-                }
-                DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> Button(
-                    onClick = onResume, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+        ) { pad ->
+            Column(Modifier.padding(pad).padding(16.dp).fillMaxSize().verticalScroll(rememberScrollState())) {
+                Box(
+                    Modifier.fillMaxWidth().height(150.dp).glass(radius = 20.dp)
+                        .background(Brush.verticalGradient(listOf((if (item.isTorrent) PurpleMagnet else statusColor).copy(alpha = 0.28f), Color.Transparent))),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.PlayArrow, null); Spacer(Modifier.width(6.dp)); Text(if (item.status == DownloadItem.Status.FAILED) stringResource(R.string.action_retry) else stringResource(R.string.action_resume))
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(
+                            Modifier.size(52.dp).glass(radius = 16.dp)
+                                .background((if (item.isTorrent) PurpleMagnet else statusColor).copy(alpha = 0.22f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                if (item.isTorrent) Icons.Default.CloudDownload else fileTypeIcon(item.fileName),
+                                null,
+                                tint = if (item.isTorrent) PurpleMagnet else statusColor,
+                                modifier = Modifier.size(26.dp)
+                            )
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Text("${(progress * 100).toInt()}%", color = TextPrimary, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                        Text(statusLabel, color = statusColor, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                    }
                 }
-                DownloadItem.Status.COMPLETED -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Button(
-                        onClick = onOpen, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                Spacer(Modifier.height(16.dp))
+                F2LProgressBar(progress = progress, color = if (item.isTorrent) PurpleMagnet else statusColor, height = 10.dp)
+
+                // Real-Time Speed & Bandwidth Graph Card
+                if (item.status == DownloadItem.Status.DOWNLOADING || item.speedHistory.isNotEmpty()) {
+                    Spacer(Modifier.height(16.dp))
+                    Card(
+                        modifier = Modifier.fillMaxWidth().glass(radius = 20.dp),
+                        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+                        shape = RoundedCornerShape(16.dp)
                     ) {
-                        Icon(Icons.Default.OpenInNew, null); Spacer(Modifier.width(6.dp)); Text(stringResource(R.string.action_open_file))
-                    }
-                    OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Default.Share, null, tint = TextPrimary); Spacer(Modifier.width(6.dp)); Text("Share", color = TextPrimary)
+                        Column(Modifier.padding(16.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Speed, null, tint = AccentBlue, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        stringResource(R.string.speed_chart_title),
+                                        color = TextPrimary,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                val peakSpeed = (item.speedHistory.maxOrNull() ?: item.speedBytesPerSec).coerceAtLeast(0L)
+                                Text(
+                                    stringResource(R.string.speed_chart_peak, "${formatBytes(peakSpeed)}/s"),
+                                    color = TextSecondary,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            SpeedGraph(
+                                history = item.speedHistory,
+                                modifier = Modifier.fillMaxWidth().height(110.dp),
+                                lineColor = statusColor,
+                                fillAlpha = 0.28f
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                Text(
+                                    stringResource(R.string.speed_chart_current, "${formatBytes(item.speedBytesPerSec)}/s"),
+                                    color = statusColor,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
                     }
                 }
-                else -> {}
+
+                Spacer(Modifier.height(20.dp))
+
+                Card(modifier = Modifier.fillMaxWidth().glass(radius = 20.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent), shape = RoundedCornerShape(16.dp)) {
+                    Column(Modifier.padding(horizontal = 16.dp)) {
+                        DetailRow(
+                            stringResource(R.string.detail_downloaded),
+                            "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
+                        )
+                        if (item.status == DownloadItem.Status.DOWNLOADING) {
+                            val detailSpeedText = if (item.speedBytesPerSec > 0) {
+                                "${formatBytes(item.speedBytesPerSec)}/s"
+                            } else if (item.downloadedBytes > 0) {
+                                "0 B/s"
+                            } else {
+                                stringResource(R.string.calculating)
+                            }
+                            DetailRow(stringResource(R.string.detail_speed), detailSpeedText)
+                            DetailRow(stringResource(R.string.detail_eta), if (item.etaSeconds > 0) formatDuration(item.etaSeconds) else stringResource(R.string.calculating))
+                        }
+                        DetailRow(
+                            stringResource(R.string.detail_connections),
+                            if (item.isTorrent) "BitTorrent protocol" else "${item.connections} threads"
+                        )
+                        DetailRow(stringResource(R.string.detail_filename), item.fileName)
+                        DetailRow(stringResource(R.string.detail_save_folder), Uri.parse(item.folderUri).lastPathSegment ?: item.folderUri)
+                        if (item.magnetHash != null) {
+                            DetailRow("Info Hash", item.magnetHash)
+                        }
+                        if (item.userAgent != null) {
+                            DetailRow("User-Agent", item.userAgent)
+                        }
+                        if (item.referer != null) {
+                            DetailRow("Referer", item.referer)
+                        }
+                        DetailRow(stringResource(R.string.detail_source_url), item.url, isLast = item.error == null)
+                        if (item.error != null) DetailRow(stringResource(R.string.detail_error), item.error, RedErr, isLast = true)
+                    }
+                }
+
+                Spacer(Modifier.height(24.dp))
+                when (item.status) {
+                    DownloadItem.Status.DOWNLOADING -> OutlinedButton(onClick = onPause, modifier = Modifier.fillMaxWidth()) {
+                        Icon(Icons.Default.Pause, null, tint = TextPrimary)
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.action_pause), color = TextPrimary)
+                    }
+                    DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> Button(
+                        onClick = onResume, modifier = Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                    ) {
+                        Icon(Icons.Default.PlayArrow, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (item.status == DownloadItem.Status.FAILED) stringResource(R.string.action_retry) else stringResource(R.string.action_resume))
+                    }
+                    DownloadItem.Status.COMPLETED -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(
+                            onClick = onOpen, modifier = Modifier.weight(1f), colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                        ) {
+                            Icon(Icons.Default.OpenInNew, null)
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.action_open_file))
+                        }
+                        OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.Share, null, tint = TextPrimary)
+                            Spacer(Modifier.width(6.dp))
+                            Text("Share", color = TextPrimary)
+                        }
+                    }
+                    else -> {}
+                }
             }
         }
-    }
     }
 }
 

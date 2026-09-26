@@ -2,33 +2,36 @@
 
 **Fast · Reliable · Simple**
 
-An Android download manager built with Kotlin + Jetpack Compose. Multi-threaded direct-link downloads, a Liquid Glass UI, and no social-media video extraction.
+An Android download manager built with Kotlin + Jetpack Compose. Multi-threaded direct-link downloads, a Liquid Glass UI, BitTorrent/magnet integration, and advanced network capabilities.
 
-<a href="https://github.com/GouthamSER/F2L-Downloader-App/releases/download/F2L-Downloader-Apk/app-debug.apk">Download Me :)</a>
-
-Version **3.2.0**
+Version **3.3.0**
 
 ## Features
 
 **Downloads**
-- Multi-threaded segmented downloads (2–16 connections) for servers that support HTTP Range requests, automatic fallback to a single connection otherwise
-- Pause / resume / retry, with automatic retry-on-failure (configurable attempt count)
-- Real-time progress, speed, and ETA — in-app and in the persistent notification (with a real progress bar)
-- Runs in a foreground service — downloads continue when the app is backgrounded, and survive even if the app process is killed (state is written straight to disk, not just kept in memory)
-- Automatic file-name detection from server headers (`Content-Disposition`), independent of the URL
-- Tap any completed file to open it directly, or share it to another app
+- Multi-threaded segmented downloads (2–16 connections) for servers supporting HTTP Range requests, with automatic fallback to single-connection downloads.
+- Real-time download speed graph and bandwidth chart with glowing gradient curves (in detail view and live sparkline cards).
+- Batch URL import: paste multiple links directly, import from clipboard, or load `.txt`/`.m3u` link files.
+- BitTorrent & magnet link integration (`magnet:?xt=urn:btih:...`): automatic metadata/hash extraction, tracker counting, and mirror fallback resolution.
+- Advanced HTTP options: custom User-Agent presets (Chrome Android, Chrome Windows PC, Firefox, Safari, Custom), custom Referer, and arbitrary custom headers/cookies (`Cookie: session=...`).
+- Pause / resume / retry, with automatic retry-on-failure (configurable attempt count).
+- Real-time progress, speed, and ETA — in-app and in persistent notifications with dedicated progress bars and quick actions (Pause / Cancel).
+- Foreground service architecture: downloads continue in the background and survive process restarts (state persisted to disk).
+- Automatic file-name detection from server headers (`Content-Disposition`) or torrent display names.
+- Direct file opening and sharing with mime-type detection.
 
 **Interface**
-- Liquid Glass design: blurred glow background, frosted translucent cards/nav/FAB (Android 12+, graceful flat fallback on older devices)
-- Light and dark theme
-- Status tabs (All / Active / Completed / Failed), a Files tab for browsing completed downloads, and a full detail screen per download
-- Onboarding flow for notification permission + default download folder on first launch
-- Exit confirmation with an active-downloads warning; back button navigates properly instead of exiting mid-flow
+- Liquid Glass design: blurred glow background, frosted translucent cards/nav/FAB (Android 12+, graceful flat fallback on older devices).
+- Light and dark theme switching.
+- Status tabs (All / Active / Completed / Failed), a Files tab for browsing completed downloads, and full detail screens with live bandwidth charts.
+- Onboarding flow for notification permission and default download directory on first launch.
+- Exit confirmation with active-downloads warning; back button navigation preserves active background tasks.
 
 **Storage & safety**
-- User-selected download directory via Storage Access Framework (SAF) — F2L only ever gets access to the folder you pick, nothing else
-- Delete confirmation dialog before removing a file — deletes the real file from storage, not just the app's list
-- No YouTube / Instagram / Facebook / social-media extraction — direct HTTP(S) links only
+- User-selected download directory via Storage Access Framework (SAF) — F2L only accesses the folder you select.
+- Resilient storage error handling: graceful prompts on permission revocations or low disk space.
+- Direct permanent deletion confirmation with disk cleanup for segment files (`.f2l.part*`).
+- Direct HTTP(S) and BitTorrent/magnet links only — no social media extractors.
 
 ## Build
 
@@ -41,13 +44,7 @@ Or via command line: `./gradlew assembleDebug`
 The generated APK is under:
 `app/build/outputs/apk/debug/app-debug.apk`
 
-A GitHub Actions workflow (`.github/workflows/build-apk.yml`) is included — push to `main`/`master` and it builds a debug APK automatically, downloadable from the Actions tab.
-
-## Notes
-
-- Servers without byte-range support automatically fall back to a single-connection download.
-- Download metadata is persisted in SharedPreferences; in-progress files use temporary `.f2l.part<N>` segment files in the selected directory, merged into the final file on completion.
-- Requires Android 8.0 (API 26) or newer.
+A GitHub Actions workflow (`.github/workflows/build-apk.yml`) is included — push to `main`/`master` to build a debug APK automatically.
 
 ## Developed by
 

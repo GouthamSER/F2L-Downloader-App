@@ -14,30 +14,106 @@ import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
 
 class DownloadEngine(private val context: Context) {
+    data class MagnetInfo(
+        val infoHash: String,
+        val displayName: String?,
+        val trackers: List<String>
+    )
+
+    data class Progress(val downloaded: Long, val total: Long, val speed: Long)
+
+    companion object {
+        fun isMagnet(url: String): Boolean = url.trim().startsWith("magnet:?", ignoreCase = true)
+
+        fun parseMagnetUri(uriString: String): MagnetInfo? {
+            val clean = uriString.trim()
+            if (!isMagnet(clean)) return null
+            return try {
+                val uri = Uri.parse(clean)
+                val xt = uri.getQueryParameter("xt") // urn:btih:<hash>
+                val hash = xt?.substringAfter("urn:btih:", "")?.trim()?.takeIf { it.isNotEmpty() }
+                    ?: return null
+                val dn = uri.getQueryParameter("dn")?.let {
+                    runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrDefault(it)
+                }
+                val trackers = uri.getQueryParameters("tr")
+                MagnetInfo(hash, dn, trackers)
+            } catch (_: Exception) {
+                null
+            }
+        }
+
+        fun httpErrorMessage(code: Int): String = when (code) {
+            401 -> "Authentication required (HTTP 401)"
+            403 -> "Access denied (HTTP 403) — check custom headers or cookies"
+            404 -> "File not found (HTTP 404)"
+            410 -> "File no longer available (HTTP 410)"
+            416 -> "Range not satisfiable (file may have changed)"
+            in 500..599 -> "Server error (HTTP $code)"
+            else -> "HTTP $code"
+        }
+    }
+
     private fun guessMime(fileName: String): String =
         android.webkit.MimeTypeMap.getSingleton()
             .getMimeTypeFromExtension(fileName.substringAfterLast('.', "").lowercase())
             ?: "application/octet-stream"
-
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .build()
 
-    data class Progress(val downloaded: Long, val total: Long, val speed: Long)
+    private fun applyCustomHeaders(
+        builder: Request.Builder,
+        userAgent: String?,
+        referer: String?,
+        customHeaders: String?
+    ) {
+        if (!userAgent.isNullOrBlank()) {
+            builder.header("User-Agent", userAgent.trim())
+        }
+        if (!referer.isNullOrBlank()) {
+            builder.header("Referer", referer.trim())
+        }
+        if (!customHeaders.isNullOrBlank()) {
+            customHeaders.lineSequence().forEach { line ->
+                val trimmed = line.trim()
+                if (trimmed.contains(':')) {
+                    val name = trimmed.substringBefore(':').trim()
+                    val value = trimmed.substringAfter(':').trim()
+                    if (name.isNotEmpty() && value.isNotEmpty()) {
+                        builder.addHeader(name, value)
+                    }
+                }
+            }
+        }
+    }
 
-    /** Detect the real file name from server headers (Content-Disposition), falling back to the URL path. */
-    suspend fun resolveFileName(url: String): String = withContext(Dispatchers.IO) {
-        val fallback = guessNameFromUrl(url)
+    /** Detect the real file name from server headers (Content-Disposition), falling back to the URL path or Magnet info. */
+    suspend fun resolveFileName(
+        url: String,
+        userAgent: String? = null,
+        referer: String? = null,
+        customHeaders: String? = null
+    ): String = withContext(Dispatchers.IO) {
+        val clean = url.trim()
+        val magnet = parseMagnetUri(clean)
+        if (magnet != null) {
+            val name = magnet.displayName?.takeIf { it.isNotBlank() } ?: "torrent-${magnet.infoHash.take(8)}"
+            return@withContext if (name.endsWith(".torrent", ignoreCase = true)) name else "$name.torrent"
+        }
+
+        val fallback = guessNameFromUrl(clean)
         try {
-            val head = client.newCall(Request.Builder().url(url).head().build()).execute()
+            val reqBuilder = Request.Builder().url(clean).head()
+            applyCustomHeaders(reqBuilder, userAgent, referer, customHeaders)
+            val head = client.newCall(reqBuilder.build()).execute()
             val disposition = head.header("Content-Disposition")
             val fromHeader = disposition?.let { parseContentDisposition(it) }
             fromHeader ?: fallback
@@ -64,22 +140,114 @@ class DownloadEngine(private val context: Context) {
         fileName: String,
         treeUri: Uri,
         connections: Int = 8,
+        userAgent: String? = null,
+        referer: String? = null,
+        customHeaders: String? = null,
         onProgress: (Progress) -> Unit
     ) = withContext(Dispatchers.IO) {
         val tree = DocumentFile.fromTreeUri(context, treeUri)
-            ?: error("Download folder is unavailable")
+            ?: error("Download folder is unavailable (permission revoked?)")
 
-        val head = client.newCall(Request.Builder().url(url).head().build()).execute()
-        if (!head.isSuccessful && head.code != 405) error("HTTP ${head.code}")
+        if (!tree.canWrite()) {
+            error("Cannot write to download folder. Please re-select the folder in Settings.")
+        }
+
+        val clean = url.trim()
+
+        // Magnet link handling
+        val magnet = parseMagnetUri(clean)
+        if (magnet != null) {
+            downloadMagnet(clean, magnet, fileName, tree, onProgress)
+            return@withContext
+        }
+
+        // Standard HTTP / HTTPS download
+        val headReq = Request.Builder().url(clean).head().apply {
+            applyCustomHeaders(this, userAgent, referer, customHeaders)
+        }.build()
+
+        val head = client.newCall(headReq).execute()
+        if (!head.isSuccessful && head.code != 405) {
+            error(httpErrorMessage(head.code))
+        }
 
         val total = head.header("Content-Length")?.toLongOrNull() ?: -1L
         val ranges = head.header("Accept-Ranges")?.contains("bytes", true) == true
 
         if (total > 0 && ranges && connections > 1) {
-            segmented(url, fileName, tree, total, min(connections, 16), onProgress)
+            try {
+                segmented(clean, fileName, tree, total, min(connections, 16), userAgent, referer, customHeaders, onProgress)
+            } catch (e: Exception) {
+                // Graceful fallback to single-connection if range requests failed midway
+                single(clean, fileName, tree, total, userAgent, referer, customHeaders, onProgress)
+            }
         } else {
-            single(url, fileName, tree, total, onProgress)
+            single(clean, fileName, tree, total, userAgent, referer, customHeaders, onProgress)
         }
+    }
+
+    private suspend fun downloadMagnet(
+        magnetUrl: String,
+        magnet: MagnetInfo,
+        fileName: String,
+        tree: DocumentFile,
+        onProgress: (Progress) -> Unit
+    ) {
+        onProgress(Progress(10, 100, 0))
+        val torrentName = if (fileName.endsWith(".torrent", ignoreCase = true)) fileName else "$fileName.torrent"
+        val existing = tree.findFile(torrentName)
+        existing?.delete()
+
+        // Attempt downloading .torrent payload from web torrent caches
+        val cacheUrls = listOf(
+            "https://itorrents.org/torrent/${magnet.infoHash.uppercase()}.torrent",
+            "https://btcache.me/torrent/${magnet.infoHash.uppercase()}"
+        )
+
+        var downloadedTorrent = false
+        for (cacheUrl in cacheUrls) {
+            try {
+                val req = Request.Builder().url(cacheUrl).header("User-Agent", "F2LDownloader/3.2.0").build()
+                client.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        res.body?.bytes()?.let { bytes ->
+                            if (bytes.isNotEmpty() && bytes.size > 50) {
+                                val file = tree.createFile("application/x-bittorrent", torrentName)
+                                    ?: error("Cannot create torrent file")
+                                context.contentResolver.openOutputStream(file.uri, "wt")?.use { out ->
+                                    out.write(bytes)
+                                }
+                                downloadedTorrent = true
+                            }
+                        }
+                    }
+                }
+                if (downloadedTorrent) break
+            } catch (_: Exception) {
+                // Next mirror
+            }
+        }
+
+        if (!downloadedTorrent) {
+            // Write standard magnet link file (.magnet) readable by external torrent clients and BitTorrent handlers
+            val magnetFileName = if (fileName.endsWith(".magnet", ignoreCase = true)) fileName else "$fileName.magnet"
+            val magnetFile = tree.findFile(magnetFileName) ?: tree.createFile("text/plain", magnetFileName)
+                ?: error("Cannot create magnet file")
+            context.contentResolver.openOutputStream(magnetFile.uri, "wt")?.use { out ->
+                val content = buildString {
+                    appendLine("[InternetShortcut]")
+                    appendLine("URL=$magnetUrl")
+                    appendLine()
+                    appendLine("# Magnet Details")
+                    appendLine("# Hash: ${magnet.infoHash}")
+                    if (magnet.displayName != null) appendLine("# Name: ${magnet.displayName}")
+                    magnet.trackers.forEach { appendLine("# Tracker: $it") }
+                }
+                out.write(content.toByteArray(Charsets.UTF_8))
+            }
+        }
+
+        onProgress(Progress(100, 100, 0))
     }
 
     private suspend fun single(
@@ -87,26 +255,31 @@ class DownloadEngine(private val context: Context) {
         fileName: String,
         tree: DocumentFile,
         total: Long,
+        userAgent: String?,
+        referer: String?,
+        customHeaders: String?,
         onProgress: (Progress) -> Unit
     ) {
         val partName = "$fileName.f2l.part"
         val part = tree.findFile(partName) ?: tree.createFile(guessMime(fileName), partName)
-        ?: error("Cannot create temporary file")
+        ?: error("Cannot create temporary download file — verify permissions or disk space")
 
         val existing = part.length().coerceAtLeast(0L)
         val request = Request.Builder().url(url).apply {
+            applyCustomHeaders(this, userAgent, referer, customHeaders)
             if (existing > 0) header("Range", "bytes=$existing-")
         }.build()
 
         client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful && response.code != 206) error("HTTP ${response.code}")
-            val start = if (response.code == 206) existing else 0L
+            if (!response.isSuccessful && response.code != 206) {
+                error(httpErrorMessage(response.code))
+            }
             if (response.code != 206 && existing > 0) {
                 context.contentResolver.openFileDescriptor(part.uri, "wt")?.use {}
             }
             response.body?.byteStream()?.use { input ->
                 val output = context.contentResolver.openOutputStream(part.uri, "wa")
-                    ?: error("Cannot open output")
+                    ?: error("Cannot open output stream for writing")
                 output.use { out ->
                     val buffer = ByteArray(256 * 1024)
                     var downloaded = if (response.code == 206) existing else 0L
@@ -135,7 +308,7 @@ class DownloadEngine(private val context: Context) {
         if (total <= 0L || completed >= total) {
             val final = tree.findFile(fileName)
             final?.delete()
-            if (!part.renameTo(fileName)) error("Cannot finalize file")
+            if (!part.renameTo(fileName)) error("Cannot finalize completed download file")
         }
     }
 
@@ -145,13 +318,14 @@ class DownloadEngine(private val context: Context) {
         tree: DocumentFile,
         total: Long,
         count: Int,
+        userAgent: String?,
+        referer: String?,
+        customHeaders: String?,
         onProgress: (Progress) -> Unit
     ) = coroutineScope {
         val chunk = (total + count - 1) / count
         val downloadedTotal = java.util.concurrent.atomic.AtomicLong(0L)
 
-        // one shared ticker reports aggregate progress + real speed every ~500ms,
-        // instead of every worker hitting DocumentFile I/O on every 128KB read.
         val reporter = launch {
             var last = 0L
             var lastT = System.nanoTime()
@@ -167,9 +341,6 @@ class DownloadEngine(private val context: Context) {
             }
         }
 
-        // Resolve/create all segment files sequentially first — SAF's createFile() isn't
-        // safe to call concurrently from multiple threads on the same folder; doing it here
-        // avoids the "Cannot create segment N" race that happens when all 8 threads hit it at once.
         data class Segment(val index: Int, val start: Long, val end: Long, val part: DocumentFile, val existing: Long)
         val segments = (0 until count).map { index ->
             val start = index * chunk
@@ -177,7 +348,7 @@ class DownloadEngine(private val context: Context) {
             val partName = "$fileName.f2l.part$index"
             var part = tree.findFile(partName)
                 ?: tree.createFile("application/octet-stream", partName)
-                ?: error("Cannot create segment $index")
+                ?: error("Cannot create segment $index — check storage space")
 
             var existing = part.length().coerceAtLeast(0L)
             val expected = end - start + 1
@@ -193,7 +364,9 @@ class DownloadEngine(private val context: Context) {
         val jobs = segments.map { seg ->
             launch(Dispatchers.IO) {
                 val expected = seg.end - seg.start + 1
-                if (seg.existing < expected) downloadRange(url, seg.part, seg.start, seg.end, seg.existing, downloadedTotal)
+                if (seg.existing < expected) {
+                    downloadRange(url, seg.part, seg.start, seg.end, seg.existing, downloadedTotal, userAgent, referer, customHeaders)
+                }
             }
         }
         jobs.joinAll()
@@ -224,12 +397,16 @@ class DownloadEngine(private val context: Context) {
         start: Long,
         end: Long,
         existing: Long,
-        downloadedTotal: java.util.concurrent.atomic.AtomicLong
+        downloadedTotal: java.util.concurrent.atomic.AtomicLong,
+        userAgent: String?,
+        referer: String?,
+        customHeaders: String?
     ) {
         val from = start + existing
-        val request = Request.Builder().url(url)
-            .header("Range", "bytes=$from-$end")
-            .build()
+        val request = Request.Builder().url(url).apply {
+            applyCustomHeaders(this, userAgent, referer, customHeaders)
+            header("Range", "bytes=$from-$end")
+        }.build()
 
         client.newCall(request).execute().use { response ->
             if (response.code != 206) error("Server refused range request (HTTP ${response.code})")

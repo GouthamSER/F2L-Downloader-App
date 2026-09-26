@@ -77,6 +77,53 @@
     <string name="detail_error">Error</string>
     <string name="calculating">Calculating…</string>
 
-    <string name="dev_version">Version 3.2.0</string>
+    <string name="dev_version">Version 3.3.0</string>
     <string name="dev_developed_by">Developed by</string>
+
+    <!-- Speed Graph -->
+    <string name="speed_chart_title">Real-Time Bandwidth</string>
+    <string name="speed_chart_peak">Peak: %1$s</string>
+    <string name="speed_chart_current">Current: %1$s</string>
+
+    <!-- Advanced HTTP Options -->
+    <string name="advanced_http_title">HTTP Headers &amp; Network</string>
+    <string name="label_user_agent">User-Agent</string>
+    <string name="hint_user_agent">Custom User-Agent header</string>
+    <string name="label_referer">Referer</string>
+    <string name="hint_referer">https://source-site.com/download</string>
+    <string name="label_custom_headers">Custom Headers / Cookies</string>
+    <string name="hint_custom_headers">Cookie: session=xyz&#10;Authorization: Bearer token</string>
+    <string name="ua_default">Default (F2L Downloader)</string>
+    <string name="ua_chrome_android">Chrome (Android)</string>
+    <string name="ua_chrome_pc">Chrome (Windows PC)</string>
+    <string name="ua_firefox_pc">Firefox (Windows PC)</string>
+    <string name="ua_safari_mac">Safari (macOS)</string>
+    <string name="ua_custom">Custom</string>
+
+    <!-- Batch Import -->
+    <string name="tab_single">Single</string>
+    <string name="tab_batch">Batch Import</string>
+    <string name="batch_input_hint">Paste multiple URLs here (one per line)…</string>
+    <string name="action_paste_clipboard">Paste from clipboard</string>
+    <string name="action_pick_file">Import from .txt / .m3u file</string>
+    <string name="batch_urls_found">%1$d URLs found</string>
+    <string name="batch_import_start">Import &amp; Start (%1$d files)</string>
+    <string name="batch_import_queue">Queue (%1$d files)</string>
+    <string name="batch_no_urls">No valid URLs found</string>
+
+    <!-- Torrent / Magnet -->
+    <string name="type_torrent">Torrent / Magnet</string>
+    <string name="magnet_detected">Magnet link detected</string>
+    <string name="torrent_hash">Info Hash: %1$s</string>
+    <string name="torrent_trackers">Trackers: %1$d</string>
+
+    <!-- Error Handling & Permissions -->
+    <string name="err_storage_revoked">Storage permission was revoked. Please re-select the download folder.</string>
+    <string name="err_disk_full">Not enough storage space available.</string>
+    <string name="err_forbidden">Access denied (HTTP 403) — server may require custom headers or login cookies.</string>
+    <string name="err_unauthorized">Authentication required (HTTP 401).</string>
+    <string name="err_not_found">File not found (HTTP 404).</string>
+    <string name="err_range_not_supported">Server does not support resuming this file.</string>
+    <string name="err_network_timeout">Connection timed out. Retrying…</string>
 </resources>
+

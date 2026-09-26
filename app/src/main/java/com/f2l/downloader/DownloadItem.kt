@@ -11,7 +11,13 @@ data class DownloadItem(
     val speedBytesPerSec: Long = 0L,
     val etaSeconds: Long = -1L,
     val error: String? = null,
-    val connections: Int = 8
+    val connections: Int = 8,
+    val userAgent: String? = null,
+    val referer: String? = null,
+    val customHeaders: String? = null,
+    val isTorrent: Boolean = false,
+    val magnetHash: String? = null,
+    val speedHistory: List<Long> = emptyList()
 ) {
     enum class Status { QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELED }
 }

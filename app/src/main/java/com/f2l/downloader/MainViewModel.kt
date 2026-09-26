@@ -20,31 +20,94 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _items = MutableStateFlow(repo.load())
     val items = _items.asStateFlow()
 
-    fun add(url: String, folder: Uri, fileName: String? = null, connections: Int = 8, autoStart: Boolean = true) {
+    fun add(
+        url: String,
+        folder: Uri,
+        fileName: String? = null,
+        connections: Int = 8,
+        autoStart: Boolean = true,
+        userAgent: String? = null,
+        referer: String? = null,
+        customHeaders: String? = null
+    ) {
         val clean = url.trim()
-        if (!clean.startsWith("http://") && !clean.startsWith("https://")) return
+        val isMagnet = DownloadEngine.isMagnet(clean)
+        if (!isMagnet && !clean.startsWith("http://", ignoreCase = true) && !clean.startsWith("https://", ignoreCase = true)) {
+            return
+        }
+
         val requestedName = fileName?.trim().takeUnless { it.isNullOrBlank() }
         val id = System.currentTimeMillis()
+        val magnetInfo = if (isMagnet) DownloadEngine.parseMagnetUri(clean) else null
+
+        val defaultName = if (isMagnet) {
+            val name = requestedName ?: magnetInfo?.displayName ?: "torrent-${magnetInfo?.infoHash?.take(8) ?: id}"
+            if (name.endsWith(".torrent", ignoreCase = true) || name.endsWith(".magnet", ignoreCase = true)) name else "$name.torrent"
+        } else {
+            requestedName ?: guessName(clean)
+        }
+
         val item = DownloadItem(
             id = id,
             url = clean,
-            fileName = requestedName ?: guessName(clean),
+            fileName = defaultName,
             folderUri = folder.toString(),
-            connections = connections.coerceIn(1, 16),
-            status = if (autoStart) DownloadItem.Status.QUEUED else DownloadItem.Status.PAUSED
+            connections = if (isMagnet) 1 else connections.coerceIn(1, 16),
+            status = if (autoStart) DownloadItem.Status.QUEUED else DownloadItem.Status.PAUSED,
+            userAgent = userAgent?.trim()?.takeIf { it.isNotEmpty() },
+            referer = referer?.trim()?.takeIf { it.isNotEmpty() },
+            customHeaders = customHeaders?.trim()?.takeIf { it.isNotEmpty() },
+            isTorrent = isMagnet,
+            magnetHash = magnetInfo?.infoHash,
+            speedHistory = emptyList()
         )
         setItems(listOf(item) + _items.value)
 
-        if (requestedName == null) {
+        if (requestedName == null && !isMagnet) {
             viewModelScope.launch {
-                val resolved = runCatching { engine.resolveFileName(clean) }.getOrNull()
+                val resolved = runCatching {
+                    engine.resolveFileName(clean, item.userAgent, item.referer, item.customHeaders)
+                }.getOrNull()
                 val current = _items.value.find { it.id == id } ?: return@launch
-                if (!resolved.isNullOrBlank() && resolved != current.fileName) update(id) { it.copy(fileName = resolved) }
+                if (!resolved.isNullOrBlank() && resolved != current.fileName) {
+                    update(id) { it.copy(fileName = resolved) }
+                }
                 if (autoStart) start(_items.value.first { it.id == id })
             }
         } else if (autoStart) {
             start(item)
         }
+    }
+
+    fun addBatch(
+        urls: List<String>,
+        folder: Uri,
+        connections: Int = 8,
+        autoStart: Boolean = true,
+        userAgent: String? = null,
+        referer: String? = null,
+        customHeaders: String? = null
+    ) {
+        urls.forEachIndexed { index, rawUrl ->
+            val clean = rawUrl.trim()
+            if (clean.isNotBlank()) {
+                add(
+                    url = clean,
+                    folder = folder,
+                    fileName = null,
+                    connections = connections,
+                    autoStart = autoStart,
+                    userAgent = userAgent,
+                    referer = referer,
+                    customHeaders = customHeaders
+                )
+            }
+        }
+    }
+
+    fun extractUrls(text: String): List<String> {
+        val regex = Regex("""(https?://[^\s<>"'{}|\\^`]+|magnet:\?[^\s<>"'{}|\\^`]+)""", RegexOption.IGNORE_CASE)
+        return regex.findAll(text).map { it.value.trim() }.filter { it.isNotEmpty() }.distinct().toList()
     }
 
     fun start(item: DownloadItem) {
@@ -62,6 +125,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             putExtra("connections", item.connections)
             putExtra("retryAttempts", settings.retryAttempts)
             putExtra("notifications", settings.notifications)
+            putExtra("userAgent", item.userAgent)
+            putExtra("referer", item.referer)
+            putExtra("customHeaders", item.customHeaders)
         }
         ContextCompat.startForegroundService(getApplication(), i)
     }
@@ -72,7 +138,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 .setAction(DownloadService.ACTION_PAUSE)
                 .putExtra("id", item.id)
         )
-        update(item.id) { it.copy(status = DownloadItem.Status.PAUSED) }
+        update(item.id) { it.copy(status = DownloadItem.Status.PAUSED, speedBytesPerSec = 0) }
     }
 
     fun delete(item: DownloadItem) {
@@ -97,11 +163,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         resolvedName: String? = null
     ) {
         update(id) {
+            val updatedHistory = (it.speedHistory + speed).takeLast(30)
             it.copy(
                 fileName = resolvedName ?: it.fileName,
                 downloadedBytes = downloaded,
                 totalBytes = if (total > 0) total else it.totalBytes,
                 speedBytesPerSec = speed,
+                speedHistory = updatedHistory,
                 etaSeconds = if (total > downloaded && speed > 0) (total - downloaded) / speed else -1
             )
         }
