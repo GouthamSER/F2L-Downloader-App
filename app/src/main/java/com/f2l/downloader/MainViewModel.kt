@@ -28,12 +28,43 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         autoStart: Boolean = true,
         userAgent: String? = null,
         referer: String? = null,
-        customHeaders: String? = null
+        customHeaders: String? = null,
+        forceRedownload: Boolean = false
     ) {
         val clean = url.trim()
         val isMagnet = DownloadEngine.isMagnet(clean)
         if (!isMagnet && !clean.startsWith("http://", ignoreCase = true) && !clean.startsWith("https://", ignoreCase = true)) {
             return
+        }
+
+        // Prevent duplicate downloads for the exact same URL
+        if (!forceRedownload) {
+            val existing = _items.value.find { it.url.equals(clean, ignoreCase = true) }
+            if (existing != null) {
+                when (existing.status) {
+                    DownloadItem.Status.DOWNLOADING, DownloadItem.Status.QUEUED -> {
+                        // Already active - do not create a duplicate download
+                        return
+                    }
+                    DownloadItem.Status.PAUSED, DownloadItem.Status.FAILED -> {
+                        // Resume or retry the existing download instead of creating a duplicate
+                        if (autoStart) start(existing)
+                        return
+                    }
+                    DownloadItem.Status.COMPLETED -> {
+                        // Check if file still exists on disk
+                        val tree = runCatching {
+                            androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), Uri.parse(existing.folderUri))
+                        }.getOrNull()
+                        val file = tree?.findFile(existing.fileName)
+                        if (file != null && file.exists() && (existing.totalBytes <= 0 || file.length() == existing.totalBytes)) {
+                            // File already completely downloaded! Do not re-download
+                            return
+                        }
+                    }
+                    else -> {}
+                }
+            }
         }
 
         val requestedName = fileName?.trim().takeUnless { it.isNullOrBlank() }
@@ -47,10 +78,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             requestedName ?: guessName(clean)
         }
 
+        val tree = runCatching {
+            androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), folder)
+        }.getOrNull()
+        val uniqueName = if (tree != null) getUniqueFileName(tree, defaultName, clean) else defaultName
+
         val item = DownloadItem(
             id = id,
             url = clean,
-            fileName = defaultName,
+            fileName = uniqueName,
             folderUri = folder.toString(),
             connections = if (isMagnet) 1 else connections.coerceIn(1, 16),
             status = if (autoStart) DownloadItem.Status.QUEUED else DownloadItem.Status.PAUSED,
@@ -69,13 +105,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     engine.resolveFileName(clean, item.userAgent, item.referer, item.customHeaders)
                 }.getOrNull()
                 val current = _items.value.find { it.id == id } ?: return@launch
-                if (!resolved.isNullOrBlank() && resolved != current.fileName) {
-                    update(id) { it.copy(fileName = resolved) }
+                var targetName = resolved ?: current.fileName
+                if (tree != null) {
+                    targetName = getUniqueFileName(tree, targetName, clean)
+                }
+                if (targetName != current.fileName) {
+                    update(id) { it.copy(fileName = targetName) }
                 }
                 if (autoStart) start(_items.value.first { it.id == id })
             }
         } else if (autoStart) {
             start(item)
+        }
+    }
+
+    private fun getUniqueFileName(
+        tree: androidx.documentfile.provider.DocumentFile,
+        baseName: String,
+        url: String
+    ): String {
+        val existingFile = tree.findFile(baseName) ?: return baseName
+        val existingItem = _items.value.find { it.url.equals(url, ignoreCase = true) && it.fileName == baseName }
+        if (existingItem != null) return baseName
+
+        val dot = baseName.lastIndexOf('.')
+        val namePart = if (dot != -1) baseName.substring(0, dot) else baseName
+        val extPart = if (dot != -1) baseName.substring(dot) else ""
+        var counter = 1
+        while (true) {
+            val candidate = "$namePart ($counter)$extPart"
+            if (tree.findFile(candidate) == null) return candidate
+            counter++
         }
     }
 
@@ -88,25 +148,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         referer: String? = null,
         customHeaders: String? = null
     ) {
-        urls.forEachIndexed { index, rawUrl ->
-            val clean = rawUrl.trim()
-            if (clean.isNotBlank()) {
-                add(
-                    url = clean,
-                    folder = folder,
-                    fileName = null,
-                    connections = connections,
-                    autoStart = autoStart,
-                    userAgent = userAgent,
-                    referer = referer,
-                    customHeaders = customHeaders
-                )
-            }
+        val uniqueUrls = urls.map { it.trim() }.filter { it.isNotBlank() }.distinct()
+        uniqueUrls.forEach { clean ->
+            add(
+                url = clean,
+                folder = folder,
+                fileName = null,
+                connections = connections,
+                autoStart = autoStart,
+                userAgent = userAgent,
+                referer = referer,
+                customHeaders = customHeaders
+            )
         }
     }
 
     fun extractUrls(text: String): List<String> {
-        val regex = Regex("""(https?://[^\s<>"'{}|\\^`]+|magnet:\?[^\s<>"'{}|\\^`]+)""", RegexOption.IGNORE_CASE)
+        val regex = Regex("""(https?://[^\s<>"'{}|\\^`]+|magnet:[^\s<>"'{}|\\^`]+)""", RegexOption.IGNORE_CASE)
         return regex.findAll(text).map { it.value.trim() }.filter { it.isNotEmpty() }.distinct().toList()
     }
 

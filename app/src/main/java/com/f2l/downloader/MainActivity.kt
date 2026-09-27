@@ -975,6 +975,14 @@ private fun AddDownloadScreen(
         }
     }
 
+    val currentItems by vm.items.collectAsStateWithLifecycle()
+    val existingItem = remember(url, currentItems) {
+        val clean = url.trim()
+        if (clean.isBlank()) null
+        else currentItems.find { it.url.equals(clean, ignoreCase = true) }
+    }
+    var isSubmitting by remember { mutableStateOf(false) }
+
     val isMagnetUrl = remember(url) { DownloadEngine.isMagnet(url) }
     val magnetInfo = remember(url) { if (isMagnetUrl) DownloadEngine.parseMagnetUri(url) else null }
     val urlValid = isMagnetUrl || url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)
@@ -1070,6 +1078,46 @@ private fun AddDownloadScreen(
                                 Text(stringResource(R.string.torrent_hash, magnetInfo.infoHash), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                                 if (magnetInfo.trackers.isNotEmpty()) {
                                     Text(stringResource(R.string.torrent_trackers, magnetInfo.trackers.size), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                        }
+                    }
+
+                    // Duplicate URL warning banner if detected
+                    if (existingItem != null) {
+                        Spacer(Modifier.height(8.dp))
+                        val (statusBg, statusColor, statusLabel) = when (existingItem.status) {
+                            DownloadItem.Status.COMPLETED -> Triple(GreenOk.copy(alpha = 0.15f), GreenOk, "Already downloaded: ${existingItem.fileName}")
+                            DownloadItem.Status.DOWNLOADING -> Triple(AccentBlue.copy(alpha = 0.15f), AccentBlue, "Currently downloading (${if (existingItem.totalBytes > 0) (existingItem.downloadedBytes * 100 / existingItem.totalBytes).toInt() else 0}%): ${existingItem.fileName}")
+                            DownloadItem.Status.PAUSED -> Triple(AmberWarn.copy(alpha = 0.15f), AmberWarn, "Paused download: ${existingItem.fileName}")
+                            DownloadItem.Status.FAILED -> Triple(RedErr.copy(alpha = 0.15f), RedErr, "Previous failed download: ${existingItem.fileName}")
+                            else -> Triple(Surface2, TextSecondary, "In queue: ${existingItem.fileName}")
+                        }
+                        Card(
+                            modifier = Modifier.fillMaxWidth().glass(radius = 12.dp),
+                            colors = CardDefaults.cardColors(containerColor = statusBg)
+                        ) {
+                            Column(Modifier.padding(12.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Info, null, tint = statusColor, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Duplicate Download", color = statusColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(statusLabel, color = TextPrimary, style = MaterialTheme.typography.bodySmall)
+                                if (existingItem.status == DownloadItem.Status.COMPLETED) {
+                                    Spacer(Modifier.height(8.dp))
+                                    OutlinedButton(
+                                        onClick = {
+                                            openDownloadedFile(context, existingItem)
+                                            onBack()
+                                        },
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(Icons.Default.OpenInNew, null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(stringResource(R.string.action_open_file), style = MaterialTheme.typography.labelSmall)
+                                    }
                                 }
                             }
                         }
@@ -1268,8 +1316,11 @@ private fun AddDownloadScreen(
 
                 // Submit Button
                 if (modeTab == 0) {
+                    val isAlreadyDownloading = existingItem?.status == DownloadItem.Status.DOWNLOADING || existingItem?.status == DownloadItem.Status.QUEUED
                     Button(
                         onClick = {
+                            if (isSubmitting) return@Button
+                            isSubmitting = true
                             onStart(
                                 url.trim(),
                                 fileName,
@@ -1281,12 +1332,14 @@ private fun AddDownloadScreen(
                                 customHeaders.trim().takeIf { it.isNotBlank() }
                             )
                         },
-                        enabled = urlValid && folder != null,
+                        enabled = !isSubmitting && urlValid && folder != null && !isAlreadyDownloading,
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = if (isMagnetUrl) PurpleMagnet else AccentBlue)
                     ) {
                         Text(
-                            if (isMagnetUrl) "Download Magnet / Torrent"
+                            if (isAlreadyDownloading) "Download Already In Progress"
+                            else if (isMagnetUrl) "Download Magnet / Torrent"
+                            else if (existingItem?.status == DownloadItem.Status.COMPLETED) "Download Copy"
                             else if (autoStart) stringResource(R.string.action_start_download)
                             else stringResource(R.string.action_add_to_queue)
                         )
@@ -1294,6 +1347,8 @@ private fun AddDownloadScreen(
                 } else {
                     Button(
                         onClick = {
+                            if (isSubmitting) return@Button
+                            isSubmitting = true
                             onBatchStart(
                                 extractedBatchUrls,
                                 folder ?: Uri.EMPTY,
@@ -1304,7 +1359,7 @@ private fun AddDownloadScreen(
                                 customHeaders.trim().takeIf { it.isNotBlank() }
                             )
                         },
-                        enabled = extractedBatchUrls.isNotEmpty() && folder != null,
+                        enabled = !isSubmitting && extractedBatchUrls.isNotEmpty() && folder != null,
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
                     ) {

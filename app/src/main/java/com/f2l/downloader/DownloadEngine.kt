@@ -28,21 +28,74 @@ class DownloadEngine(private val context: Context) {
     data class Progress(val downloaded: Long, val total: Long, val speed: Long)
 
     companion object {
-        fun isMagnet(url: String): Boolean = url.trim().startsWith("magnet:?", ignoreCase = true)
+        fun isMagnet(url: String): Boolean = url.trim().startsWith("magnet:", ignoreCase = true)
+
+        private fun base32ToHex(base32: String): String? {
+            val clean = base32.trim().uppercase()
+            if (clean.length != 32) return null
+            val base32Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+            var buffer = 0
+            var bitsLeft = 0
+            val bytes = ByteArray(20)
+            var count = 0
+            for (c in clean) {
+                val valIndex = base32Chars.indexOf(c)
+                if (valIndex < 0) return null
+                buffer = (buffer shl 5) or valIndex
+                bitsLeft += 5
+                if (bitsLeft >= 8) {
+                    bytes[count++] = ((buffer shr (bitsLeft - 8)) and 0xFF).toByte()
+                    bitsLeft -= 8
+                }
+            }
+            if (count != 20) return null
+            return bytes.joinToString("") { "%02X".format(it) }
+        }
 
         fun parseMagnetUri(uriString: String): MagnetInfo? {
             val clean = uriString.trim()
             if (!isMagnet(clean)) return null
             return try {
-                val uri = Uri.parse(clean)
-                val xt = uri.getQueryParameter("xt") // urn:btih:<hash>
-                val hash = xt?.substringAfter("urn:btih:", "")?.trim()?.takeIf { it.isNotEmpty() }
-                    ?: return null
-                val dn = uri.getQueryParameter("dn")?.let {
-                    runCatching { java.net.URLDecoder.decode(it, "UTF-8") }.getOrDefault(it)
+                val queryIndex = clean.indexOf('?')
+                val queryString = if (queryIndex != -1) clean.substring(queryIndex + 1) else clean.substringAfter("magnet:")
+                val params = queryString.split('&')
+                var hash: String? = null
+                var dn: String? = null
+                val trackers = mutableListOf<String>()
+
+                for (param in params) {
+                    if (param.isBlank()) continue
+                    val eqIdx = param.indexOf('=')
+                    val key = if (eqIdx != -1) param.substring(0, eqIdx).trim() else param.trim()
+                    val rawVal = if (eqIdx != -1) param.substring(eqIdx + 1).trim() else ""
+                    val value = runCatching { java.net.URLDecoder.decode(rawVal, "UTF-8") }.getOrDefault(rawVal)
+
+                    when (key.lowercase()) {
+                        "xt" -> {
+                            val candidate = when {
+                                value.startsWith("urn:btih:", ignoreCase = true) -> value.substring(9).trim()
+                                value.startsWith("urn:btmh:", ignoreCase = true) -> value.substring(9).trim()
+                                else -> value.substringAfterLast(':', value).trim()
+                            }
+                            if (candidate.isNotEmpty() && hash == null) {
+                                hash = if (candidate.length == 32) base32ToHex(candidate) ?: candidate else candidate
+                            }
+                        }
+                        "dn" -> {
+                            if (value.isNotBlank() && dn == null) {
+                                dn = value
+                            }
+                        }
+                        "tr" -> {
+                            if (value.isNotBlank()) {
+                                trackers.add(value)
+                            }
+                        }
+                    }
                 }
-                val trackers = uri.getQueryParameters("tr")
-                MagnetInfo(hash, dn, trackers)
+
+                if (hash.isNullOrBlank()) return null
+                MagnetInfo(hash.uppercase(), dn, trackers)
             } catch (_: Exception) {
                 null
             }
@@ -103,10 +156,10 @@ class DownloadEngine(private val context: Context) {
         customHeaders: String? = null
     ): String = withContext(Dispatchers.IO) {
         val clean = url.trim()
-        val magnet = parseMagnetUri(clean)
-        if (magnet != null) {
-            val name = magnet.displayName?.takeIf { it.isNotBlank() } ?: "torrent-${magnet.infoHash.take(8)}"
-            return@withContext if (name.endsWith(".torrent", ignoreCase = true)) name else "$name.torrent"
+        if (isMagnet(clean)) {
+            val magnet = parseMagnetUri(clean)
+            val name = magnet?.displayName?.takeIf { it.isNotBlank() } ?: "torrent-${magnet?.infoHash?.take(8) ?: System.currentTimeMillis()}"
+            return@withContext if (name.endsWith(".torrent", ignoreCase = true) || name.endsWith(".magnet", ignoreCase = true)) name else "$name.torrent"
         }
 
         val fallback = guessNameFromUrl(clean)
@@ -154,10 +207,14 @@ class DownloadEngine(private val context: Context) {
 
         val clean = url.trim()
 
-        // Magnet link handling
-        val magnet = parseMagnetUri(clean)
-        if (magnet != null) {
-            downloadMagnet(clean, magnet, fileName, tree, onProgress)
+        // Magnet link handling - MUST NEVER fall through to OkHttp
+        if (isMagnet(clean)) {
+            val magnet = parseMagnetUri(clean)
+            if (magnet != null) {
+                downloadMagnet(clean, magnet, fileName, tree, onProgress)
+            } else {
+                downloadRawMagnet(clean, fileName, tree, onProgress)
+            }
             return@withContext
         }
 
@@ -173,6 +230,18 @@ class DownloadEngine(private val context: Context) {
 
         val total = head.header("Content-Length")?.toLongOrNull() ?: -1L
         val ranges = head.header("Accept-Ranges")?.contains("bytes", true) == true
+
+        // Check if the destination file is already completely downloaded
+        val existingFinal = tree.findFile(fileName)
+        if (existingFinal != null && existingFinal.exists()) {
+            val existingLen = existingFinal.length()
+            if (total > 0 && existingLen == total) {
+                // File is already fully downloaded! Clean up any leftover segments and complete
+                cleanupPartFiles(tree, fileName)
+                onProgress(Progress(total, total, 0))
+                return@withContext
+            }
+        }
 
         if (total > 0 && ranges && connections > 1) {
             try {
@@ -194,7 +263,8 @@ class DownloadEngine(private val context: Context) {
         onProgress: (Progress) -> Unit
     ) {
         onProgress(Progress(10, 100, 0))
-        val torrentName = if (fileName.endsWith(".torrent", ignoreCase = true)) fileName else "$fileName.torrent"
+        val baseName = fileName.removeSuffix(".torrent").removeSuffix(".magnet")
+        val torrentName = "$baseName.torrent"
         val existing = tree.findFile(torrentName)
         existing?.delete()
 
@@ -230,9 +300,10 @@ class DownloadEngine(private val context: Context) {
 
         if (!downloadedTorrent) {
             // Write standard magnet link file (.magnet) readable by external torrent clients and BitTorrent handlers
-            val magnetFileName = if (fileName.endsWith(".magnet", ignoreCase = true)) fileName else "$fileName.magnet"
-            val magnetFile = tree.findFile(magnetFileName) ?: tree.createFile("text/plain", magnetFileName)
-                ?: error("Cannot create magnet file")
+            val magnetFileName = "$baseName.magnet"
+            val existingMag = tree.findFile(magnetFileName)
+            val magnetFile = if (existingMag != null && existingMag.canWrite()) existingMag
+                else tree.createFile("text/plain", magnetFileName) ?: error("Cannot create magnet file")
             context.contentResolver.openOutputStream(magnetFile.uri, "wt")?.use { out ->
                 val content = buildString {
                     appendLine("[InternetShortcut]")
@@ -248,6 +319,39 @@ class DownloadEngine(private val context: Context) {
         }
 
         onProgress(Progress(100, 100, 0))
+    }
+
+    private suspend fun downloadRawMagnet(
+        magnetUrl: String,
+        fileName: String,
+        tree: DocumentFile,
+        onProgress: (Progress) -> Unit
+    ) {
+        onProgress(Progress(10, 100, 0))
+        val baseName = fileName.removeSuffix(".torrent").removeSuffix(".magnet")
+        val magnetFileName = "$baseName.magnet"
+        val existingMag = tree.findFile(magnetFileName)
+        val magnetFile = if (existingMag != null && existingMag.canWrite()) existingMag
+            else tree.createFile("text/plain", magnetFileName) ?: error("Cannot create magnet file")
+        context.contentResolver.openOutputStream(magnetFile.uri, "wt")?.use { out ->
+            val content = buildString {
+                appendLine("[InternetShortcut]")
+                appendLine("URL=$magnetUrl")
+            }
+            out.write(content.toByteArray(Charsets.UTF_8))
+        }
+        onProgress(Progress(100, 100, 0))
+    }
+
+    private fun cleanupPartFiles(tree: DocumentFile, fileName: String) {
+        try {
+            tree.listFiles().forEach { f ->
+                val n = f.name ?: return@forEach
+                if (n == "$fileName.f2l.part" || (n.startsWith("$fileName.f2l.part") && n != fileName)) {
+                    f.delete()
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     private suspend fun single(
@@ -307,8 +411,27 @@ class DownloadEngine(private val context: Context) {
         val completed = part.length()
         if (total <= 0L || completed >= total) {
             val final = tree.findFile(fileName)
-            final?.delete()
-            if (!part.renameTo(fileName)) error("Cannot finalize completed download file")
+            if (final != null && final.canWrite()) {
+                context.contentResolver.openOutputStream(final.uri, "wt")?.use { sink ->
+                    context.contentResolver.openInputStream(part.uri)?.use { input ->
+                        input.copyTo(sink, 256 * 1024)
+                    }
+                }
+                part.delete()
+            } else {
+                final?.delete()
+                if (!part.renameTo(fileName)) {
+                    val newFile = tree.createFile(guessMime(fileName), fileName)
+                        ?: error("Cannot finalize completed download file")
+                    context.contentResolver.openOutputStream(newFile.uri, "wt")?.use { sink ->
+                        context.contentResolver.openInputStream(part.uri)?.use { input ->
+                            input.copyTo(sink, 256 * 1024)
+                        }
+                    }
+                    part.delete()
+                }
+            }
+            cleanupPartFiles(tree, fileName)
         }
     }
 
@@ -373,10 +496,14 @@ class DownloadEngine(private val context: Context) {
         reporter.cancel()
         onProgress(Progress(downloadedTotal.get(), total, 0))
 
-        val final = tree.findFile(fileName)
-        final?.delete()
-        val output = tree.createFile(guessMime(fileName), fileName)
-            ?: error("Cannot create final file")
+        val existingFinal = tree.findFile(fileName)
+        val output = if (existingFinal != null && existingFinal.canWrite()) {
+            existingFinal
+        } else {
+            existingFinal?.delete()
+            tree.createFile(guessMime(fileName), fileName)
+                ?: error("Cannot create final file")
+        }
         val out = context.contentResolver.openOutputStream(output.uri, "wt")
             ?: error("Cannot open final file")
         out.use { sink ->
@@ -388,6 +515,7 @@ class DownloadEngine(private val context: Context) {
                 part.delete()
             }
         }
+        cleanupPartFiles(tree, fileName)
         onProgress(Progress(total, total, 0))
     }
 
