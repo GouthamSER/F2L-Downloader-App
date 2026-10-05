@@ -4,7 +4,7 @@
 
 An Android download manager built with Kotlin + Jetpack Compose. Multi-threaded direct-link downloads, a Liquid Glass UI, BitTorrent/magnet integration, and advanced network capabilities.
 
-Version **3.3.0**
+Version **3.4.0**
 
 ## Features
 
@@ -32,6 +32,10 @@ Version **3.3.0**
 - Resilient storage error handling: graceful prompts on permission revocations or low disk space.
 - Direct permanent deletion confirmation with disk cleanup for segment files (`.f2l.part*`).
 - Direct HTTP(S) and BitTorrent/magnet links only — no social media extractors.
+
+## Updates
+
+Settings → **Check for updates** (and optional check on startup) reads GitHub Releases. Setup steps: see [UPDATES.md](UPDATES.md).
 
 ## Build
 
