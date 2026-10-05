@@ -12,8 +12,28 @@ android {
         applicationId = "com.f2l.downloader"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8
-        versionName = "3.3.0"
+        versionCode = 9
+        versionName = "3.4.0"
+    }
+
+    // Signed release builds (used by .github/workflows/release.yml). Keystore comes from env vars / GitHub Secrets.
+    val keystorePath: String? = System.getenv("F2L_KEYSTORE_FILE")
+    signingConfigs {
+        if (keystorePath != null && file(keystorePath).exists()) {
+            create("release") {
+                storeFile = file(keystorePath)
+                storePassword = System.getenv("F2L_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("F2L_KEY_ALIAS")
+                keyPassword = System.getenv("F2L_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            signingConfigs.findByName("release")?.let { signingConfig = it }
+        }
     }
 
     buildFeatures {
