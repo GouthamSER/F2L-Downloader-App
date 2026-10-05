@@ -150,7 +150,7 @@ class DownloadService : Service() {
                                 delay(2000L * attempt)
                                 continue
                             }
-                            val errorMsg = e.message ?: "Download failed"
+                            val errorMsg = ErrorMessages.friendly(e)
                             persist(id) { it.copy(status = DownloadItem.Status.FAILED, error = errorMsg) }
                             sendBroadcast(Intent(ACTION_FAILED).setPackage(packageName)
                                 .putExtra("id", id).putExtra("error", errorMsg))

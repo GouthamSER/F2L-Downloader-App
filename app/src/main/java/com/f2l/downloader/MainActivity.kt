@@ -55,6 +55,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -220,6 +222,32 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
     var showSplash by remember { mutableStateOf(true) }
     LaunchedEffect(Unit) { delay(1800); showSplash = false }
 
+    // Update check on startup (max once per 12h, silent when up to date / offline)
+    var startupUpdate by remember { mutableStateOf<UpdateChecker.UpdateInfo?>(null) }
+    LaunchedEffect(Unit) {
+        delay(4000)
+        val st = vm.settings
+        if (st.autoUpdateCheck && System.currentTimeMillis() - st.lastUpdateCheck > 12 * 3600_000L) {
+            when (val r = UpdateChecker.check()) {
+                is UpdateChecker.Result.Available -> { st.lastUpdateCheck = System.currentTimeMillis(); startupUpdate = r.info }
+                is UpdateChecker.Result.UpToDate -> st.lastUpdateCheck = System.currentTimeMillis()
+                is UpdateChecker.Result.Error -> {}
+            }
+        }
+    }
+
+    // Clipboard link banner: offer to download a copied link
+    val clipboard = LocalClipboardManager.current
+    var clipUrl by remember { mutableStateOf<String?>(null) }
+    var dismissedClip by remember { mutableStateOf("") }
+    var resumeTick by remember { mutableIntStateOf(0) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { resumeTick++ }
+    LaunchedEffect(resumeTick) {
+        delay(600) // clipboard is only readable once the window has focus
+        val found = vm.extractUrls(clipboard.getText()?.text.orEmpty()).firstOrNull()
+        clipUrl = if (found != null && found != dismissedClip && vm.items.value.none { it.url.equals(found, true) }) found else null
+    }
+
     if (showSplash) {
         SplashScreen()
         return
@@ -303,6 +331,8 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
         )
     }
 
+    startupUpdate?.let { info -> UpdateDialog(info) { startupUpdate = null } }
+
     GlassBackground {
         Scaffold(
             containerColor = Color.Transparent,
@@ -331,12 +361,22 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
             },
             bottomBar = { BottomBar(tab) { tab = it } }
         ) { pad ->
-            Box(Modifier.padding(pad).fillMaxSize()) {
-                when (tab) {
-                    Tab.HOME -> DownloadListScreen(items, showFilters = true, filterDefault = StatusFilter.ALL, vm = vm)
-                    Tab.DOWNLOADS -> DownloadListScreen(items, showFilters = false, filterDefault = StatusFilter.ACTIVE, vm = vm)
-                    Tab.FILES -> FilesScreen(items)
-                    Tab.SETTINGS -> SettingsScreen(vm)
+            Column(Modifier.padding(pad).fillMaxSize()) {
+                val copied = clipUrl
+                if (tab == Tab.HOME && copied != null) {
+                    ClipboardBanner(
+                        url = copied,
+                        onDownload = { prefillUrl = copied; dismissedClip = copied; clipUrl = null; showAddScreen = true },
+                        onDismiss = { dismissedClip = copied; clipUrl = null }
+                    )
+                }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    when (tab) {
+                        Tab.HOME -> DownloadListScreen(items, showFilters = true, filterDefault = StatusFilter.ALL, vm = vm)
+                        Tab.DOWNLOADS -> DownloadListScreen(items, showFilters = false, filterDefault = StatusFilter.ACTIVE, vm = vm)
+                        Tab.FILES -> FilesScreen(items)
+                        Tab.SETTINGS -> SettingsScreen(vm)
+                    }
                 }
             }
         }
@@ -347,6 +387,12 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
 private fun OnboardingScreen(onDone: (Uri?) -> Unit) {
     val context = LocalContext.current
     var step by remember { mutableStateOf(0) }
+    var pickedUri by remember { mutableStateOf<Uri?>(null) }
+    val guideRepo = remember { SettingsRepository(context.applicationContext) }
+    fun afterFolder(uri: Uri?) {
+        pickedUri = uri
+        if (guideRepo.guideSeen) onDone(uri) else step = 2
+    }
 
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { step = 1 }
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -357,7 +403,7 @@ private fun OnboardingScreen(onDone: (Uri?) -> Unit) {
                 )
             }
         }
-        onDone(uri)
+        afterFolder(uri)
     }
 
     GlassBackground {
@@ -392,6 +438,25 @@ private fun OnboardingScreen(onDone: (Uri?) -> Unit) {
                         colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
                     ) { Text("Allow notifications") }
                     TextButton(onClick = { step = 1 }) { Text("Skip", color = TextSecondary) }
+                } else if (step == 2) {
+                    Icon(Icons.Default.Lightbulb, null, tint = AccentBlue, modifier = Modifier.size(36.dp))
+                    Spacer(Modifier.height(12.dp))
+                    Text("How to download", color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(12.dp))
+                    listOf(
+                        "1. Copy a link in your browser — F2L offers to download it.",
+                        "2. Or tap Share in any app and choose F2L Downloader.",
+                        "3. Or tap the + button and paste one or many links.",
+                        "Pause and resume any time — progress is never lost."
+                    ).forEach {
+                        Text(it, color = TextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp))
+                    }
+                    Spacer(Modifier.height(24.dp))
+                    Button(
+                        onClick = { guideRepo.guideSeen = true; onDone(pickedUri) },
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                    ) { Text("Get started") }
                 } else {
                     Icon(Icons.Default.Folder, null, tint = AccentBlue, modifier = Modifier.size(36.dp))
                     Spacer(Modifier.height(12.dp))
@@ -407,7 +472,7 @@ private fun OnboardingScreen(onDone: (Uri?) -> Unit) {
                         modifier = Modifier.fillMaxWidth().height(48.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
                     ) { Text("Choose folder") }
-                    TextButton(onClick = { onDone(null) }) { Text("Skip for now", color = TextSecondary) }
+                    TextButton(onClick = { afterFolder(null) }) { Text("Skip for now", color = TextSecondary) }
                 }
             }
         }
@@ -530,6 +595,40 @@ private fun openDownloadedFile(context: android.content.Context, item: DownloadI
         android.widget.Toast.makeText(context, "No app found to open this file", android.widget.Toast.LENGTH_SHORT).show()
     } catch (e: Exception) {
         android.widget.Toast.makeText(context, "Couldn't open file: ${e.localizedMessage ?: "Unknown error"}", android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun showInFolder(context: android.content.Context, item: DownloadItem) {
+    try {
+        val tree = Uri.parse(item.folderUri)
+        val dirUri = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+            tree, android.provider.DocumentsContract.getTreeDocumentId(tree)
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(dirUri, android.provider.DocumentsContract.Document.MIME_TYPE_DIR)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        android.widget.Toast.makeText(context, "Couldn't open the folder. Look in: ${Uri.parse(item.folderUri).lastPathSegment ?: "your download folder"}", android.widget.Toast.LENGTH_LONG).show()
+    }
+}
+
+@Composable
+private fun ClipboardBanner(url: String, onDownload: () -> Unit, onDismiss: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)
+            .glass(radius = 16.dp).padding(start = 12.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Default.ContentPaste, null, tint = AccentBlue, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text("Link copied — download it?", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+            Text(url, color = TextPrimary, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+        }
+        TextButton(onClick = onDownload) { Text("Download", color = AccentBlue) }
+        IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "Dismiss", tint = TextSecondary) }
     }
 }
 
@@ -716,7 +815,10 @@ private fun DownloadListScreen(
                         onClick = {
                             if (item.status == DownloadItem.Status.COMPLETED) openDownloadedFile(context, item)
                             else selected = item
-                        }
+                        },
+                        onOpen = { openDownloadedFile(context, item) },
+                        onShare = { shareDownloadedFile(context, item) },
+                        onShowFolder = { showInFolder(context, item) }
                     )
                 }
             }
@@ -744,7 +846,10 @@ private fun DownloadCard(
     onPause: () -> Unit,
     onResume: () -> Unit,
     onDelete: () -> Unit,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onOpen: () -> Unit = {},
+    onShare: () -> Unit = {},
+    onShowFolder: () -> Unit = {}
 ) {
     val progress = if (item.totalBytes > 0)
         (item.downloadedBytes.toFloat() / item.totalBytes).coerceIn(0f, 1f) else 0f
@@ -869,6 +974,26 @@ private fun DownloadCard(
                         Icon(Icons.Default.PlayArrow, null)
                         Spacer(Modifier.width(6.dp))
                         Text(if (item.status == DownloadItem.Status.FAILED) stringResource(R.string.action_retry) else stringResource(R.string.action_resume))
+                    }
+                }
+                DownloadItem.Status.COMPLETED -> {
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onOpen, modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = AccentBlue)
+                        ) { Text("Open", maxLines = 1) }
+                        OutlinedButton(onClick = onShare, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                            Icon(Icons.Default.Share, null, tint = TextPrimary, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Share", color = TextPrimary, maxLines = 1)
+                        }
+                        OutlinedButton(onClick = onShowFolder, modifier = Modifier.weight(1f), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                            Icon(Icons.Default.FolderOpen, null, tint = TextPrimary, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Folder", color = TextPrimary, maxLines = 1)
+                        }
                     }
                 }
                 else -> {}
@@ -1391,6 +1516,20 @@ private fun SettingsScreen(vm: MainViewModel) {
     var appearanceMenu by remember { mutableStateOf(false) }
     var themeMode by remember { mutableStateOf(settings.themeMode) }
 
+    var autoUpdate by remember { mutableStateOf(settings.autoUpdateCheck) }
+    var checkingUpdate by remember { mutableStateOf(false) }
+    var updateStatus by remember { mutableStateOf<String?>(null) }
+    var updateInfo by remember { mutableStateOf<UpdateChecker.UpdateInfo?>(null) }
+    var showHelp by remember { mutableStateOf(false) }
+    val updateScope = rememberCoroutineScope()
+
+    if (showHelp) {
+        BackHandler { showHelp = false }
+        HelpScreen(onBack = { showHelp = false })
+        return
+    }
+    updateInfo?.let { info -> UpdateDialog(info) { updateInfo = null } }
+
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             runCatching {
@@ -1461,11 +1600,45 @@ private fun SettingsScreen(vm: MainViewModel) {
             }
         }
 
+        Spacer(Modifier.height(20.dp))
+        SettingsSection(title = "Help & updates") {
+            SettingsRow(
+                icon = Icons.Default.SystemUpdate, title = "Check for updates",
+                subtitle = if (checkingUpdate) "Checking…" else updateStatus ?: "Current version ${BuildConfig.VERSION_NAME}",
+                onClick = {
+                    if (!checkingUpdate) {
+                        checkingUpdate = true
+                        updateScope.launch {
+                            when (val r = UpdateChecker.check()) {
+                                is UpdateChecker.Result.Available -> {
+                                    updateStatus = "Version ${r.info.version} available"
+                                    updateInfo = r.info
+                                    settings.lastUpdateCheck = System.currentTimeMillis()
+                                }
+                                is UpdateChecker.Result.UpToDate -> {
+                                    updateStatus = "You're up to date"
+                                    settings.lastUpdateCheck = System.currentTimeMillis()
+                                }
+                                is UpdateChecker.Result.Error -> updateStatus = "Couldn't check: ${r.message}"
+                            }
+                            checkingUpdate = false
+                        }
+                    }
+                }
+            )
+            SettingsToggleRow(
+                icon = Icons.Default.Autorenew, title = "Check on startup",
+                subtitle = "Look for a new version when the app opens",
+                checked = autoUpdate, onCheckedChange = { autoUpdate = it; settings.autoUpdateCheck = it }
+            )
+            SettingsRow(icon = Icons.Default.Info, title = "Help & FAQ", subtitle = "How to use F2L, fix common problems", onClick = { showHelp = true })
+        }
+
         Spacer(Modifier.height(24.dp))
         Card(modifier = Modifier.fillMaxWidth().glass(radius = 18.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent), shape = RoundedCornerShape(14.dp)) {
             Column(Modifier.padding(16.dp)) {
                 Text("F2L Downloader", color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text(stringResource(R.string.dev_version), color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.dev_version, BuildConfig.VERSION_NAME), color = TextSecondary, style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(12.dp))
                 Text(stringResource(R.string.dev_developed_by), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
                 Text("Goutham Josh", color = TextPrimary, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Bold)
@@ -1480,6 +1653,50 @@ private fun SettingsScreen(vm: MainViewModel) {
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun HelpScreen(onBack: () -> Unit) {
+    val faq = listOf(
+        "How do I download a file?" to "Tap the + button and paste a link, or copy a link in your browser and tap the banner that appears on Home. You can also use Share in any app and pick F2L Downloader.",
+        "How do I download many links at once?" to "On the Add screen open the Batch Import tab. Paste one link per line, or import a .txt / .m3u file.",
+        "What happens when I pause and resume?" to "F2L keeps what is already downloaded and continues from there. The server must support resuming; if it does not, the file starts again.",
+        "A download failed. What now?" to "Open the card and read the message — it tells you what to do. Then tap Retry. Common causes: no internet, no free space, or the folder permission was lost (pick the folder again in Settings).",
+        "Where are my files?" to "In the folder you picked. Tap Folder on a finished download to open it, or use the Files tab.",
+        "What are threads / connections?" to "Each thread downloads a different part of the file at the same time. 8 is a good default. More is not always faster.",
+        "What does Wi-Fi only do?" to "Downloads wait until you are on Wi-Fi, then start by themselves. Turn it off in Settings to use mobile data.",
+        "Do magnet links work?" to "F2L saves the .torrent file (or a .magnet file) for your torrent app. It does not download the torrent contents itself.",
+        "A site says access denied (403)." to "Open Add download, expand HTTP Headers & Network, and set the Referer, User-Agent, or Cookie the site expects.",
+        "How do I update the app?" to "Settings → Check for updates. The new version downloads inside the app and Android asks you to install it. Allow 'install unknown apps' for F2L the first time."
+    )
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = TextPrimary) }
+            Text("Help & FAQ", color = TextPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.height(8.dp))
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            items(faq) { (q, a) ->
+                var open by remember { mutableStateOf(false) }
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth().glass(radius = 16.dp).clickable { open = !open }
+                ) {
+                    Column(Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(q, color = TextPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            Icon(if (open) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null, tint = TextSecondary)
+                        }
+                        if (open) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(a, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

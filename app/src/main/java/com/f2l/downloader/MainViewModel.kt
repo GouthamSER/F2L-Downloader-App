@@ -3,7 +3,9 @@ package com.f2l.downloader
 import android.app.Application
 import android.content.Intent
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -19,6 +21,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val settings = SettingsRepository(app)
     private val _items = MutableStateFlow(repo.load())
     val items = _items.asStateFlow()
+
+    companion object {
+        const val WAIT_WIFI = "Waiting for Wi-Fi — resumes automatically"
+    }
+
+    // Auto-resume downloads that were waiting for Wi-Fi as soon as Wi-Fi comes back
+    private val connectivity = app.getSystemService(ConnectivityManager::class.java)
+    private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            viewModelScope.launch {
+                _items.value
+                    .filter { it.status == DownloadItem.Status.PAUSED && it.error == WAIT_WIFI }
+                    .forEach { start(it, skipWifiCheck = true) }
+            }
+        }
+    }
+
+    init {
+        runCatching {
+            connectivity?.registerNetworkCallback(
+                NetworkRequest.Builder()
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .build(),
+                wifiCallback
+            )
+        }
+    }
+
+    override fun onCleared() {
+        runCatching { connectivity?.unregisterNetworkCallback(wifiCallback) }
+        super.onCleared()
+    }
 
     fun add(
         url: String,
@@ -168,9 +203,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return regex.findAll(text).map { it.value.trim() }.filter { it.isNotEmpty() }.distinct().toList()
     }
 
-    fun start(item: DownloadItem) {
-        if (settings.wifiOnly && !isOnWifi()) {
-            update(item.id) { it.copy(status = DownloadItem.Status.FAILED, error = "Waiting for Wi-Fi") }
+    fun start(item: DownloadItem, skipWifiCheck: Boolean = false) {
+        if (!skipWifiCheck && settings.wifiOnly && !isOnWifi()) {
+            update(item.id) { it.copy(status = DownloadItem.Status.PAUSED, error = WAIT_WIFI, speedBytesPerSec = 0) }
             return
         }
         update(item.id) { it.copy(status = DownloadItem.Status.DOWNLOADING, error = null) }
@@ -187,7 +222,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             putExtra("referer", item.referer)
             putExtra("customHeaders", item.customHeaders)
         }
-        ContextCompat.startForegroundService(getApplication(), i)
+        try {
+            ContextCompat.startForegroundService(getApplication(), i)
+        } catch (e: Exception) {
+            // Android blocks starting a foreground service while the app is in background
+            update(item.id) { it.copy(status = DownloadItem.Status.PAUSED, error = "Tap Resume to continue", speedBytesPerSec = 0) }
+        }
     }
 
     fun pause(item: DownloadItem) {

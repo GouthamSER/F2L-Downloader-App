@@ -33,4 +33,16 @@ class SettingsRepository(context: Context) {
     var themeMode: String
         get() = prefs.getString("theme_mode", "dark") ?: "dark"
         set(v) = prefs.edit().putString("theme_mode", v).apply()
+
+    var autoUpdateCheck: Boolean
+        get() = prefs.getBoolean("auto_update_check", true)
+        set(v) = prefs.edit().putBoolean("auto_update_check", v).apply()
+
+    var lastUpdateCheck: Long
+        get() = prefs.getLong("last_update_check", 0L)
+        set(v) = prefs.edit().putLong("last_update_check", v).apply()
+
+    var guideSeen: Boolean
+        get() = prefs.getBoolean("guide_seen", false)
+        set(v) = prefs.edit().putBoolean("guide_seen", v).apply()
 }

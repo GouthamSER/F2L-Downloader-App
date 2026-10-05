@@ -3,6 +3,7 @@ package com.f2l.downloader
 import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -223,13 +224,20 @@ class DownloadEngine(private val context: Context) {
             applyCustomHeaders(this, userAgent, referer, customHeaders)
         }.build()
 
-        val head = client.newCall(headReq).execute()
-        if (!head.isSuccessful && head.code != 405) {
-            error(httpErrorMessage(head.code))
+        var headCode = 0
+        var total = -1L
+        var ranges = false
+        client.newCall(headReq).execute().use { head ->
+            headCode = head.code
+            total = head.header("Content-Length")?.toLongOrNull() ?: -1L
+            ranges = head.header("Accept-Ranges")?.contains("bytes", true) == true
+        }
+        if (headCode !in 200..299 && headCode != 405) {
+            error(httpErrorMessage(headCode))
         }
 
-        val total = head.header("Content-Length")?.toLongOrNull() ?: -1L
-        val ranges = head.header("Accept-Ranges")?.contains("bytes", true) == true
+        // Remove orphan temp files left by older pause/resume runs (e.g. "name.f2l.part.mp4", "name.f2l.part (1)")
+        removeStrayParts(tree, fileName)
 
         // Check if the destination file is already completely downloaded
         val existingFinal = tree.findFile(fileName)
@@ -246,6 +254,9 @@ class DownloadEngine(private val context: Context) {
         if (total > 0 && ranges && connections > 1) {
             try {
                 segmented(clean, fileName, tree, total, min(connections, 16), userAgent, referer, customHeaders, onProgress)
+            } catch (e: CancellationException) {
+                // Pause / cancel: keep segment files for resume, never fall back
+                throw e
             } catch (e: Exception) {
                 // Graceful fallback to single-connection if range requests failed midway
                 single(clean, fileName, tree, total, userAgent, referer, customHeaders, onProgress)
@@ -343,6 +354,18 @@ class DownloadEngine(private val context: Context) {
         onProgress(Progress(100, 100, 0))
     }
 
+    /** Delete temp files that start with "<name>.f2l.part" but are not one of our exact part names. */
+    private fun removeStrayParts(tree: DocumentFile, fileName: String) {
+        try {
+            val prefix = "$fileName.f2l.part"
+            val valid = Regex("^" + Regex.escape(prefix) + "(\\d{1,2})?$")
+            tree.listFiles().forEach { f ->
+                val n = f.name ?: return@forEach
+                if (n.startsWith(prefix) && !valid.matches(n)) f.delete()
+            }
+        } catch (_: Exception) {}
+    }
+
     private fun cleanupPartFiles(tree: DocumentFile, fileName: String) {
         try {
             tree.listFiles().forEach { f ->
@@ -365,7 +388,9 @@ class DownloadEngine(private val context: Context) {
         onProgress: (Progress) -> Unit
     ) {
         val partName = "$fileName.f2l.part"
-        val part = tree.findFile(partName) ?: tree.createFile(guessMime(fileName), partName)
+        // octet-stream keeps the exact name; a real mime makes SAF append an extension (name.f2l.part.mp4)
+        // so findFile() missed it on resume and a new temp file was created every time.
+        val part = tree.findFile(partName) ?: tree.createFile("application/octet-stream", partName)
         ?: error("Cannot create temporary download file — verify permissions or disk space")
 
         val existing = part.length().coerceAtLeast(0L)
