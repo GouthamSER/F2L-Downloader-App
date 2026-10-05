@@ -1,0 +1,59 @@
+name: Release APK
+
+# Push a tag like v3.4.0 -> builds a SIGNED release APK and publishes it as a GitHub Release.
+# The app's "Check for updates" reads this release.
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match versionName in app/build.gradle.kts
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          VER=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
+          echo "tag=$TAG versionName=$VER"
+          [ "$TAG" = "$VER" ] || { echo "::error::Tag v$TAG does not match versionName $VER"; exit 1; }
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/f2l.jks"
+
+      - name: Build signed release APK
+        env:
+          F2L_KEYSTORE_FILE: ${{ runner.temp }}/f2l.jks
+          F2L_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          F2L_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          F2L_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon
+
+      - name: Name the APK
+        run: mv app/build/outputs/apk/release/app-release.apk "F2L-Downloader-${GITHUB_REF_NAME}.apk"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: F2L-Downloader-*.apk
+          generate_release_notes: true
