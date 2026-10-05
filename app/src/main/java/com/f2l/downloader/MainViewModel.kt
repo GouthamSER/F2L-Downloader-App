@@ -260,6 +260,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         speed: Long,
         resolvedName: String? = null
     ) {
+        if (speed < 0) { // finalizing: joining parts into the final file
+            update(id) { it.copy(downloadedBytes = downloaded, totalBytes = if (total > 0) total else it.totalBytes, speedBytesPerSec = -1, etaSeconds = -1) }
+            return
+        }
         update(id) {
             val updatedHistory = (it.speedHistory + speed).takeLast(30)
             it.copy(

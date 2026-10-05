@@ -941,7 +941,9 @@ private fun DownloadCard(
             if (item.status == DownloadItem.Status.DOWNLOADING) {
                 Spacer(Modifier.height(4.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    val speedText = if (item.speedBytesPerSec > 0) {
+                    val speedText = if (item.speedBytesPerSec < 0) {
+                        "Finishing file — joining parts…"
+                    } else if (item.speedBytesPerSec > 0) {
                         "${formatBytes(item.speedBytesPerSec)}/s"
                     } else if (item.downloadedBytes > 0) {
                         "0 B/s"
@@ -1842,7 +1844,7 @@ private fun DownloadDetailScreen(
                             Spacer(Modifier.height(8.dp))
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                                 Text(
-                                    stringResource(R.string.speed_chart_current, "${formatBytes(item.speedBytesPerSec)}/s"),
+                                    stringResource(R.string.speed_chart_current, "${formatBytes(item.speedBytesPerSec.coerceAtLeast(0L))}/s"),
                                     color = statusColor,
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold
@@ -1861,7 +1863,9 @@ private fun DownloadDetailScreen(
                             "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}"
                         )
                         if (item.status == DownloadItem.Status.DOWNLOADING) {
-                            val detailSpeedText = if (item.speedBytesPerSec > 0) {
+                            val detailSpeedText = if (item.speedBytesPerSec < 0) {
+                                "Finishing file…"
+                            } else if (item.speedBytesPerSec > 0) {
                                 "${formatBytes(item.speedBytesPerSec)}/s"
                             } else if (item.downloadedBytes > 0) {
                                 "0 B/s"

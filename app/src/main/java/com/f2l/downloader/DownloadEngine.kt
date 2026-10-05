@@ -26,7 +26,12 @@ class DownloadEngine(private val context: Context) {
         val trackers: List<String>
     )
 
-    data class Progress(val downloaded: Long, val total: Long, val speed: Long)
+    /** speed == FINALIZING means: all bytes downloaded, now joining parts / writing final file */
+    data class Progress(val downloaded: Long, val total: Long, val speed: Long) {
+        companion object { const val FINALIZING = -1L }
+    }
+
+    private class RangeRefusedException(msg: String) : Exception(msg)
 
     companion object {
         fun isMagnet(url: String): Boolean = url.trim().startsWith("magnet:", ignoreCase = true)
@@ -120,7 +125,8 @@ class DownloadEngine(private val context: Context) {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .readTimeout(30, TimeUnit.SECONDS) // stalled connection -> timeout -> auto retry (was 0 = hang forever)
+        .retryOnConnectionFailure(true)
         .build()
 
     private fun applyCustomHeaders(
@@ -251,15 +257,24 @@ class DownloadEngine(private val context: Context) {
             }
         }
 
-        if (total > 0 && ranges && connections > 1) {
+        // A single-connection temp file with data means an earlier run already fell back to 1 connection: keep resuming it
+        val singlePartLen = tree.findFile("$fileName.f2l.part")?.length() ?: 0L
+        if (total > 0 && ranges && connections > 1 && singlePartLen <= 0L) {
             try {
                 segmented(clean, fileName, tree, total, min(connections, 16), userAgent, referer, customHeaders, onProgress)
             } catch (e: CancellationException) {
                 // Pause / cancel: keep segment files for resume, never fall back
                 throw e
             } catch (e: Exception) {
-                // Graceful fallback to single-connection if range requests failed midway
-                single(clean, fileName, tree, total, userAgent, referer, customHeaders, onProgress)
+                // Server refuses parallel ranges, or segments barely started: use 1 connection and drop the empty segment files.
+                // Otherwise (real progress made, e.g. network blip) rethrow so the retry loop resumes the segments.
+                val got = segmentBytes(tree, fileName)
+                if (e is RangeRefusedException || got < total / 20) {
+                    removeSegmentParts(tree, fileName)
+                    single(clean, fileName, tree, total, userAgent, referer, customHeaders, onProgress)
+                } else {
+                    throw e
+                }
             }
         } else {
             single(clean, fileName, tree, total, userAgent, referer, customHeaders, onProgress)
@@ -354,6 +369,20 @@ class DownloadEngine(private val context: Context) {
         onProgress(Progress(100, 100, 0))
     }
 
+    private fun segmentRegex(fileName: String) = Regex("^" + Regex.escape("$fileName.f2l.part") + "\\d{1,2}$")
+
+    private fun segmentBytes(tree: DocumentFile, fileName: String): Long = try {
+        val re = segmentRegex(fileName)
+        tree.listFiles().filter { f -> f.name?.let { re.matches(it) } == true }.sumOf { it.length().coerceAtLeast(0L) }
+    } catch (_: Exception) { 0L }
+
+    private fun removeSegmentParts(tree: DocumentFile, fileName: String) {
+        try {
+            val re = segmentRegex(fileName)
+            tree.listFiles().forEach { f -> if (f.name?.let { re.matches(it) } == true) f.delete() }
+        } catch (_: Exception) {}
+    }
+
     /** Delete temp files that start with "<name>.f2l.part" but are not one of our exact part names. */
     private fun removeStrayParts(tree: DocumentFile, fileName: String) {
         try {
@@ -434,7 +463,12 @@ class DownloadEngine(private val context: Context) {
         }
 
         val completed = part.length()
+        if (total > 0L && completed < total) {
+            // Server closed the stream early. Throw so the retry loop resumes instead of marking a half file as done.
+            throw java.io.IOException("unexpected end of stream")
+        }
         if (total <= 0L || completed >= total) {
+            onProgress(Progress(completed, total, Progress.FINALIZING))
             val final = tree.findFile(fileName)
             if (final != null && final.canWrite()) {
                 context.contentResolver.openOutputStream(final.uri, "wt")?.use { sink ->
@@ -519,7 +553,7 @@ class DownloadEngine(private val context: Context) {
         }
         jobs.joinAll()
         reporter.cancel()
-        onProgress(Progress(downloadedTotal.get(), total, 0))
+        onProgress(Progress(downloadedTotal.get(), total, Progress.FINALIZING))
 
         val existingFinal = tree.findFile(fileName)
         val output = if (existingFinal != null && existingFinal.canWrite()) {
@@ -562,7 +596,7 @@ class DownloadEngine(private val context: Context) {
         }.build()
 
         client.newCall(request).execute().use { response ->
-            if (response.code != 206) error("Server refused range request (HTTP ${response.code})")
+            if (response.code != 206) throw RangeRefusedException("Server refused range request (HTTP ${response.code})")
             response.body?.byteStream()?.use { input ->
                 val out = context.contentResolver.openOutputStream(part.uri, "wa")
                     ?: error("Cannot open segment output")
@@ -578,6 +612,7 @@ class DownloadEngine(private val context: Context) {
                         got += n
                         downloadedTotal.addAndGet(n.toLong())
                     }
+                    if (got < end - start + 1) throw java.io.IOException("unexpected end of stream")
                 }
             }
         }

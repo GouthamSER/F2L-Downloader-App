@@ -76,6 +76,7 @@ class DownloadService : Service() {
 
                 val job = scope.launch {
                     var attempt = 0
+                    var bestBytes = 0L
                     while (true) {
                         try {
                             var lastNotify = 0L
@@ -95,6 +96,8 @@ class DownloadService : Service() {
                                     putExtra("total", p.total)
                                     putExtra("speed", p.speed)
                                 })
+                                // real progress made -> give the retry budget back (long downloads survive many network blips)
+                                if (p.downloaded > bestBytes + 2_000_000L) { bestBytes = p.downloaded; attempt = 0 }
                                 val now = System.currentTimeMillis()
                                 if (now - lastNotify > 800) {
                                     lastNotify = now
@@ -112,7 +115,7 @@ class DownloadService : Service() {
                                             buildNotification(
                                                 downloadId = id,
                                                 title = name,
-                                                text = "$percent% • $speedText • ETA $etaText",
+                                                text = if (p.speed < 0) "Finishing file…" else "$percent% • $speedText • ETA $etaText",
                                                 progressPercent = percent,
                                                 indeterminate = p.total <= 0,
                                                 treeUri = tree
