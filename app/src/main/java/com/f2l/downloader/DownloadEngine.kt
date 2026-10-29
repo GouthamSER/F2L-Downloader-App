@@ -4,6 +4,9 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -13,7 +16,9 @@ import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
+import okhttp3.Call
 import okhttp3.OkHttpClient
+import okhttp3.Response
 import okhttp3.Request
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -129,6 +134,23 @@ class DownloadEngine(private val context: Context) {
         .retryOnConnectionFailure(true)
         .build()
 
+    /**
+     * Run a blocking OkHttp call so that coroutine cancel (pause / app closed) aborts the socket at once.
+     * Without this a paused download kept blocking in read() up to 30s, then threw IOException,
+     * which the service treated as a network error (retry) and the job never ended -> Resume was ignored.
+     */
+    private suspend inline fun <T> Call.executeCancellable(block: (Response) -> T): T {
+        val call = this
+        val watcher = CoroutineScope(currentCoroutineContext()).launch(Dispatchers.Default) {
+            try { awaitCancellation() } finally { call.cancel() }
+        }
+        try {
+            return call.execute().use(block)
+        } finally {
+            watcher.cancel()
+        }
+    }
+
     private fun applyCustomHeaders(
         builder: Request.Builder,
         userAgent: String?,
@@ -173,9 +195,9 @@ class DownloadEngine(private val context: Context) {
         try {
             val reqBuilder = Request.Builder().url(clean).head()
             applyCustomHeaders(reqBuilder, userAgent, referer, customHeaders)
-            val head = client.newCall(reqBuilder.build()).execute()
-            val disposition = head.header("Content-Disposition")
-            val fromHeader = disposition?.let { parseContentDisposition(it) }
+            val fromHeader = client.newCall(reqBuilder.build()).execute().use { head ->
+                head.header("Content-Disposition")?.let { parseContentDisposition(it) }
+            }
             fromHeader ?: fallback
         } catch (_: Exception) {
             fallback
@@ -233,7 +255,7 @@ class DownloadEngine(private val context: Context) {
         var headCode = 0
         var total = -1L
         var ranges = false
-        client.newCall(headReq).execute().use { head ->
+        client.newCall(headReq).executeCancellable { head ->
             headCode = head.code
             total = head.header("Content-Length")?.toLongOrNull() ?: -1L
             ranges = head.header("Accept-Ranges")?.contains("bytes", true) == true
@@ -266,6 +288,8 @@ class DownloadEngine(private val context: Context) {
                 // Pause / cancel: keep segment files for resume, never fall back
                 throw e
             } catch (e: Exception) {
+                // Pause closes the socket -> IOException("Canceled"); that is a pause, not a failure: never wipe parts
+                coroutineContext.ensureActive()
                 // Server refuses parallel ranges, or segments barely started: use 1 connection and drop the empty segment files.
                 // Otherwise (real progress made, e.g. network blip) rethrow so the retry loop resumes the segments.
                 val got = segmentBytes(tree, fileName)
@@ -422,42 +446,55 @@ class DownloadEngine(private val context: Context) {
         val part = tree.findFile(partName) ?: tree.createFile("application/octet-stream", partName)
         ?: error("Cannot create temporary download file — verify permissions or disk space")
 
-        val existing = part.length().coerceAtLeast(0L)
-        val request = Request.Builder().url(url).apply {
-            applyCustomHeaders(this, userAgent, referer, customHeaders)
-            if (existing > 0) header("Range", "bytes=$existing-")
-        }.build()
+        var existing = part.length().coerceAtLeast(0L)
+        if (total > 0L && existing > total) {
+            // corrupt / changed file: start over
+            context.contentResolver.openFileDescriptor(part.uri, "wt")?.use {}
+            existing = 0L
+        }
 
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful && response.code != 206) {
-                error(httpErrorMessage(response.code))
-            }
-            if (response.code != 206 && existing > 0) {
-                context.contentResolver.openFileDescriptor(part.uri, "wt")?.use {}
-            }
-            response.body?.byteStream()?.use { input ->
-                val output = context.contentResolver.openOutputStream(part.uri, "wa")
-                    ?: error("Cannot open output stream for writing")
-                output.use { out ->
-                    val buffer = ByteArray(256 * 1024)
-                    var downloaded = if (response.code == 206) existing else 0L
-                    var last = downloaded
-                    var lastT = System.nanoTime()
-                    while (true) {
-                        coroutineContext.ensureActive()
-                        val n = input.read(buffer)
-                        if (n < 0) break
-                        out.write(buffer, 0, n)
-                        downloaded += n
-                        val now = System.nanoTime()
-                        if (now - lastT > 500_000_000L) {
-                            val sec = (now - lastT) / 1e9
-                            onProgress(Progress(downloaded, total, ((downloaded - last) / sec).toLong()))
-                            last = downloaded
-                            lastT = now
+        // Part already complete (app was killed while finalizing): do NOT send Range (server answers 416) - just finalize.
+        if (!(total > 0L && existing == total)) {
+            val request = Request.Builder().url(url).apply {
+                applyCustomHeaders(this, userAgent, referer, customHeaders)
+                if (existing > 0) header("Range", "bytes=$existing-")
+            }.build()
+
+            client.newCall(request).executeCancellable { response ->
+                // 416 with data on disk and unknown total = part already holds the whole file
+                val alreadyDone = response.code == 416 && existing > 0 && total <= 0L
+                if (!alreadyDone && !response.isSuccessful && response.code != 206) {
+                    error(httpErrorMessage(response.code))
+                }
+                if (!alreadyDone) {
+                    if (response.code != 206 && existing > 0) {
+                        context.contentResolver.openFileDescriptor(part.uri, "wt")?.use {}
+                    }
+                    response.body?.byteStream()?.use { input ->
+                        val output = context.contentResolver.openOutputStream(part.uri, "wa")
+                            ?: error("Cannot open output stream for writing")
+                        output.use { out ->
+                            val buffer = ByteArray(256 * 1024)
+                            var downloaded = if (response.code == 206) existing else 0L
+                            var last = downloaded
+                            var lastT = System.nanoTime()
+                            while (true) {
+                                coroutineContext.ensureActive()
+                                val n = input.read(buffer)
+                                if (n < 0) break
+                                out.write(buffer, 0, n)
+                                downloaded += n
+                                val now = System.nanoTime()
+                                if (now - lastT > 500_000_000L) {
+                                    val sec = (now - lastT) / 1e9
+                                    onProgress(Progress(downloaded, total, ((downloaded - last) / sec).toLong()))
+                                    last = downloaded
+                                    lastT = now
+                                }
+                            }
+                            onProgress(Progress(downloaded, total, 0))
                         }
                     }
-                    onProgress(Progress(downloaded, total, 0))
                 }
             }
         }
@@ -467,31 +504,31 @@ class DownloadEngine(private val context: Context) {
             // Server closed the stream early. Throw so the retry loop resumes instead of marking a half file as done.
             throw java.io.IOException("unexpected end of stream")
         }
-        if (total <= 0L || completed >= total) {
-            onProgress(Progress(completed, total, Progress.FINALIZING))
-            val final = tree.findFile(fileName)
-            if (final != null && final.canWrite()) {
-                context.contentResolver.openOutputStream(final.uri, "wt")?.use { sink ->
+        onProgress(Progress(completed, total, Progress.FINALIZING))
+        val final = tree.findFile(fileName)
+        if (final != null && final.canWrite()) {
+            // copy first, delete part only after the copy fully succeeded (kill mid-copy -> part still intact)
+            context.contentResolver.openOutputStream(final.uri, "wt")?.use { sink ->
+                context.contentResolver.openInputStream(part.uri)?.use { input ->
+                    input.copyTo(sink, 256 * 1024)
+                }
+            }
+            part.delete()
+        } else {
+            final?.delete()
+            if (!part.renameTo(fileName)) {
+                val newFile = tree.createFile(guessMime(fileName), fileName)
+                    ?: error("Cannot finalize completed download file")
+                context.contentResolver.openOutputStream(newFile.uri, "wt")?.use { sink ->
                     context.contentResolver.openInputStream(part.uri)?.use { input ->
                         input.copyTo(sink, 256 * 1024)
                     }
                 }
                 part.delete()
-            } else {
-                final?.delete()
-                if (!part.renameTo(fileName)) {
-                    val newFile = tree.createFile(guessMime(fileName), fileName)
-                        ?: error("Cannot finalize completed download file")
-                    context.contentResolver.openOutputStream(newFile.uri, "wt")?.use { sink ->
-                        context.contentResolver.openInputStream(part.uri)?.use { input ->
-                            input.copyTo(sink, 256 * 1024)
-                        }
-                    }
-                    part.delete()
-                }
             }
-            cleanupPartFiles(tree, fileName)
         }
+        cleanupPartFiles(tree, fileName)
+        onProgress(Progress(completed, total, 0))
     }
 
     private suspend fun segmented(
@@ -565,14 +602,20 @@ class DownloadEngine(private val context: Context) {
         }
         val out = context.contentResolver.openOutputStream(output.uri, "wt")
             ?: error("Cannot open final file")
+        // Parts are deleted ONLY after the whole merge worked. Before, each part was deleted right after copy,
+        // so an app kill mid-merge lost data and the next run downloaded everything again from 0.
         out.use { sink ->
             for (i in 0 until count) {
+                coroutineContext.ensureActive()
                 val part = tree.findFile("$fileName.f2l.part$i") ?: error("Missing segment $i")
                 context.contentResolver.openInputStream(part.uri)?.use { input ->
                     input.copyTo(sink, 256 * 1024)
                 } ?: error("Cannot read segment $i")
-                part.delete()
             }
+        }
+        val written = tree.findFile(fileName)?.length() ?: -1L
+        if (written != total) {
+            throw java.io.IOException("merge incomplete ($written/$total), keeping parts")
         }
         cleanupPartFiles(tree, fileName)
         onProgress(Progress(total, total, 0))
@@ -595,7 +638,7 @@ class DownloadEngine(private val context: Context) {
             header("Range", "bytes=$from-$end")
         }.build()
 
-        client.newCall(request).execute().use { response ->
+        client.newCall(request).executeCancellable { response ->
             if (response.code != 206) throw RangeRefusedException("Server refused range request (HTTP ${response.code})")
             response.body?.byteStream()?.use { input ->
                 val out = context.contentResolver.openOutputStream(part.uri, "wa")

@@ -50,6 +50,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    init {
+        reconcileStaleItems()
+    }
+
+    /**
+     * App was closed from recents / process was killed while downloading: the saved list still says
+     * DOWNLOADING (or QUEUED) but no download thread exists in this process. Resume them from their
+     * part files (Auto-resume on) or mark them PAUSED so the buttons work and nothing looks fake-active.
+     */
+    private fun reconcileStaleItems() {
+        val stale = _items.value.filter {
+            (it.status == DownloadItem.Status.DOWNLOADING || it.status == DownloadItem.Status.QUEUED) &&
+                !DownloadService.isRunning(it.id)
+        }
+        if (stale.isEmpty()) return
+        stale.forEach { item ->
+            update(item.id) { it.copy(status = DownloadItem.Status.PAUSED, speedBytesPerSec = 0, etaSeconds = -1) }
+        }
+        if (settings.autoResume) {
+            stale.forEach { start(it) }
+        }
+    }
+
     override fun onCleared() {
         runCatching { connectivity?.unregisterNetworkCallback(wifiCallback) }
         super.onCleared()

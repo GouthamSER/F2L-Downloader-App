@@ -5,9 +5,18 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 class DownloadRepository(context: Context) {
+    companion object { private val LOCK = Any() }
+
     private val prefs = context.getSharedPreferences("f2l_downloads", Context.MODE_PRIVATE)
 
-    fun load(): List<DownloadItem> {
+    fun load(): List<DownloadItem> = synchronized(LOCK) { loadLocked() }
+
+    /** Atomic read-modify-write for one item (service + UI both write this file). */
+    fun update(id: Long, transform: (DownloadItem) -> DownloadItem) = synchronized(LOCK) {
+        saveLocked(loadLocked().map { if (it.id == id) transform(it) else it })
+    }
+
+    private fun loadLocked(): List<DownloadItem> {
         val a = JSONArray(prefs.getString("items", "[]") ?: "[]")
         return buildList {
             for (i in 0 until a.length()) {
@@ -34,7 +43,9 @@ class DownloadRepository(context: Context) {
         }
     }
 
-    fun save(items: List<DownloadItem>) {
+    fun save(items: List<DownloadItem>) = synchronized(LOCK) { saveLocked(items) }
+
+    private fun saveLocked(items: List<DownloadItem>) {
         val a = JSONArray()
         items.forEach { item ->
             a.put(JSONObject().apply {
