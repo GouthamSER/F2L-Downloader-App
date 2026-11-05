@@ -17,7 +17,13 @@ data class DownloadItem(
     val customHeaders: String? = null,
     val isTorrent: Boolean = false,
     val magnetHash: String? = null,
-    val speedHistory: List<Long> = emptyList()
+    val speedHistory: List<Long> = emptyList(),
+    /** YouTube / yt-dlp job: "video" or "audio"; null = normal download */
+    val ytKind: String? = null,
+    val ytFormat: String? = null,
+    val ytAudioExt: String? = null,
+    val ytAudioQuality: String? = null,
+    val ytSize: Long = 0L
 ) {
     enum class Status { QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELED }
 }

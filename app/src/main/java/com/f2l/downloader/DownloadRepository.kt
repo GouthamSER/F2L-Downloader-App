@@ -37,7 +37,12 @@ class DownloadRepository(context: Context) {
                     referer = if (o.has("referer") && !o.isNull("referer")) o.getString("referer") else null,
                     customHeaders = if (o.has("customHeaders") && !o.isNull("customHeaders")) o.getString("customHeaders") else null,
                     isTorrent = o.optBoolean("isTorrent", false),
-                    magnetHash = if (o.has("magnetHash") && !o.isNull("magnetHash")) o.getString("magnetHash") else null
+                    magnetHash = if (o.has("magnetHash") && !o.isNull("magnetHash")) o.getString("magnetHash") else null,
+                    ytKind = o.optString("ytKind", "").ifEmpty { null },
+                    ytFormat = o.optString("ytFormat", "").ifEmpty { null },
+                    ytAudioExt = o.optString("ytAudioExt", "").ifEmpty { null },
+                    ytAudioQuality = o.optString("ytAudioQuality", "").ifEmpty { null },
+                    ytSize = o.optLong("ytSize", 0L)
                 ))
             }
         }
@@ -63,6 +68,11 @@ class DownloadRepository(context: Context) {
                 if (item.customHeaders != null) put("customHeaders", item.customHeaders)
                 if (item.isTorrent) put("isTorrent", true)
                 if (item.magnetHash != null) put("magnetHash", item.magnetHash)
+                if (item.ytKind != null) put("ytKind", item.ytKind)
+                if (item.ytFormat != null) put("ytFormat", item.ytFormat)
+                if (item.ytAudioExt != null) put("ytAudioExt", item.ytAudioExt)
+                if (item.ytAudioQuality != null) put("ytAudioQuality", item.ytAudioQuality)
+                if (item.ytSize > 0) put("ytSize", item.ytSize)
             })
         }
         prefs.edit().putString("items", a.toString()).apply()

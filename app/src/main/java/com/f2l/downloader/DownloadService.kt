@@ -66,7 +66,12 @@ class DownloadService : Service() {
         val notificationsOn: Boolean,
         val userAgent: String?,
         val referer: String?,
-        val customHeaders: String?
+        val customHeaders: String?,
+        val ytKind: String? = null,
+        val ytFormat: String? = null,
+        val ytAudioExt: String? = null,
+        val ytAudioQuality: String? = null,
+        val ytSize: Long = 0L
     )
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -91,7 +96,12 @@ class DownloadService : Service() {
                     notificationsOn = intent.getBooleanExtra("notifications", true),
                     userAgent = intent.getStringExtra("userAgent"),
                     referer = intent.getStringExtra("referer"),
-                    customHeaders = intent.getStringExtra("customHeaders")
+                    customHeaders = intent.getStringExtra("customHeaders"),
+                    ytKind = intent.getStringExtra("ytKind"),
+                    ytFormat = intent.getStringExtra("ytFormat"),
+                    ytAudioExt = intent.getStringExtra("ytAudioExt"),
+                    ytAudioQuality = intent.getStringExtra("ytAudioQuality"),
+                    ytSize = intent.getLongExtra("ytSize", 0L)
                 )
                 val running = jobs[id]
                 if (running != null && running.isActive && !running.isCancelled) return START_STICKY
@@ -118,6 +128,7 @@ class DownloadService : Service() {
                     scope.launch {
                         old?.join()
                         deleteDownloadFiles(tree, name)
+                        YtDlpEngine.deleteTmp(this@DownloadService, id)
                         stopIfIdle()
                     }
                 } else stopIfIdle()
@@ -155,7 +166,8 @@ class DownloadService : Service() {
         }
         pending.forEach { d ->
             val p = Params(d.id, d.url, d.fileName, d.folderUri, d.connections, settings.retryAttempts,
-                settings.notifications, d.userAgent, d.referer, d.customHeaders)
+                settings.notifications, d.userAgent, d.referer, d.customHeaders,
+                d.ytKind, d.ytFormat, d.ytAudioExt, d.ytAudioQuality, d.ytSize)
             promoteToForeground(p)
             launchJob(p)
         }
@@ -204,15 +216,7 @@ class DownloadService : Service() {
             try {
                 if (pendingDelay > 0) { delay(pendingDelay); pendingDelay = 0 }
                 var lastNotify = 0L
-                engine.download(
-                    url = p.url,
-                    fileName = name,
-                    treeUri = Uri.parse(tree),
-                    connections = p.connections,
-                    userAgent = p.userAgent,
-                    referer = p.referer,
-                    customHeaders = p.customHeaders
-                ) { prog ->
+                val progressCb: (DownloadEngine.Progress) -> Unit = { prog ->
                     sendBroadcast(Intent(ACTION_PROGRESS).apply {
                         setPackage(packageName)
                         putExtra("id", id)
@@ -247,6 +251,32 @@ class DownloadService : Service() {
                             )
                         }
                     }
+                }
+                if (p.ytKind != null) {
+                    YtDlpEngine.download(
+                        ctx = this@DownloadService,
+                        id = id,
+                        url = p.url,
+                        fileName = name,
+                        treeUri = Uri.parse(tree),
+                        kind = p.ytKind,
+                        format = p.ytFormat,
+                        audioExt = p.ytAudioExt,
+                        audioQuality = p.ytAudioQuality,
+                        estimatedSize = p.ytSize,
+                        onProgress = progressCb
+                    )
+                } else {
+                    engine.download(
+                        url = p.url,
+                        fileName = name,
+                        treeUri = Uri.parse(tree),
+                        connections = p.connections,
+                        userAgent = p.userAgent,
+                        referer = p.referer,
+                        customHeaders = p.customHeaders,
+                        onProgress = progressCb
+                    )
                 }
                 persist(id) { it.copy(status = DownloadItem.Status.COMPLETED, speedBytesPerSec = 0, downloadedBytes = it.totalBytes.coerceAtLeast(it.downloadedBytes)) }
                 if (notificationsOn && canPostNotifications()) {

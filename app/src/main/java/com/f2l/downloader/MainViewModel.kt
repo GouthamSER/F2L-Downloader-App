@@ -177,6 +177,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** YouTube link: user picked a quality (video) or MP3/M4A (audio) in the YouTube panel. */
+    fun addYoutube(url: String, folder: Uri, info: YtDlpEngine.Info, option: YtDlpEngine.Option, autoStart: Boolean = true) {
+        val clean = url.trim()
+        val ext = if (option.isAudio) (option.audioExt ?: "mp3") else "mp4"
+        val base = YtDlpEngine.safeName(info.title) + if (option.isAudio) "" else " [${option.label}]"
+        val tree = runCatching {
+            androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), folder)
+        }.getOrNull()
+        val name = if (tree != null) getUniqueFileName(tree, "$base.$ext", clean + option.label) else "$base.$ext"
+        val id = System.currentTimeMillis()
+        val item = DownloadItem(
+            id = id,
+            url = clean,
+            fileName = name,
+            folderUri = folder.toString(),
+            totalBytes = option.approxBytes.takeIf { it > 0 } ?: -1L,
+            connections = 1,
+            status = if (autoStart) DownloadItem.Status.QUEUED else DownloadItem.Status.PAUSED,
+            ytKind = if (option.isAudio) "audio" else "video",
+            ytFormat = option.selector,
+            ytAudioExt = option.audioExt,
+            ytAudioQuality = option.audioQuality,
+            ytSize = option.approxBytes
+        )
+        setItems(listOf(item) + _items.value)
+        if (autoStart) start(item)
+    }
+
     private fun getUniqueFileName(
         tree: androidx.documentfile.provider.DocumentFile,
         baseName: String,
@@ -244,6 +272,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             putExtra("userAgent", item.userAgent)
             putExtra("referer", item.referer)
             putExtra("customHeaders", item.customHeaders)
+            putExtra("ytKind", item.ytKind)
+            putExtra("ytFormat", item.ytFormat)
+            putExtra("ytAudioExt", item.ytAudioExt)
+            putExtra("ytAudioQuality", item.ytAudioQuality)
+            putExtra("ytSize", item.ytSize)
         }
         try {
             ContextCompat.startForegroundService(getApplication(), i)

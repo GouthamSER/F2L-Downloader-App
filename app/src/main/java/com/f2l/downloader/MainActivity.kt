@@ -62,14 +62,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-// ---- palette matching the reference design (deep navy + blue accent) ----
-private var BgDark = Color(0xFF0B0D12)
-private var Surface1 = Color(0xFF121722)
-private var Surface2 = Color(0xFF171D2B)
-private val AccentBlue = Color(0xFF2F7BFF)
-private var TextPrimary = Color(0xFFEFF2F7)
-private var TextSecondary = Color(0xFF8B93A7)
-private val GreenOk = Color(0xFF33C481)
+// ---- OceanMint palette: deep teal-navy + cyan/teal/lime accents ----
+private var BgDark = Color(0xFF04141C)
+private var Surface1 = Color(0xFF082630)
+private var Surface2 = Color(0xFF0C3340)
+private val AccentBlue = Color(0xFF14C8D8)
+private var TextPrimary = Color(0xFFECFEFF)
+private var TextSecondary = Color(0xFF8FBFC4)
+private val GreenOk = Color(0xFF4ADE80)
 private val AmberWarn = Color(0xFFF2A93B)
 private val RedErr = Color(0xFFE0554F)
 private val PurpleMagnet = Color(0xFFA855F7)
@@ -78,17 +78,17 @@ private var isLightMode = false
 private fun applyPalette(mode: String) {
     isLightMode = mode == "light"
     if (isLightMode) {
-        BgDark = Color(0xFFF5F6F9)
+        BgDark = Color(0xFFF0FAFA)
         Surface1 = Color(0xFFFFFFFF)
-        Surface2 = Color(0xFFE9ECF2)
-        TextPrimary = Color(0xFF10131A)
-        TextSecondary = Color(0xFF5A6270)
+        Surface2 = Color(0xFFDDF1F2)
+        TextPrimary = Color(0xFF062027)
+        TextSecondary = Color(0xFF4B6B70)
     } else {
-        BgDark = Color(0xFF0B0D12)
-        Surface1 = Color(0xFF121722)
-        Surface2 = Color(0xFF171D2B)
-        TextPrimary = Color(0xFFEFF2F7)
-        TextSecondary = Color(0xFF8B93A7)
+        BgDark = Color(0xFF04141C)
+        Surface1 = Color(0xFF082630)
+        Surface2 = Color(0xFF0C3340)
+        TextPrimary = Color(0xFFECFEFF)
+        TextSecondary = Color(0xFF8FBFC4)
     }
 }
 
@@ -117,17 +117,17 @@ private fun GlassBackground(content: @Composable BoxScope.() -> Unit) {
         Box(
             Modifier.size(260.dp).offset((-70).dp, (-60).dp).align(Alignment.TopStart)
                 .graphicsLayer { alpha = blobAlpha; renderEffect = blurEffect(70f) }
-                .background(Brush.radialGradient(listOf(Color(0xFF3B6BFF), Color.Transparent)), CircleShape)
+                .background(Brush.radialGradient(listOf(Color(0xFF0891B2), Color.Transparent)), CircleShape)
         )
         Box(
             Modifier.size(230.dp).offset(70.dp, 260.dp).align(Alignment.TopEnd)
                 .graphicsLayer { alpha = blobAlpha; renderEffect = blurEffect(70f) }
-                .background(Brush.radialGradient(listOf(Color(0xFF7B5CFF), Color.Transparent)), CircleShape)
+                .background(Brush.radialGradient(listOf(Color(0xFF3B82F6), Color.Transparent)), CircleShape)
         )
         Box(
             Modifier.size(200.dp).offset((-40).dp, 60.dp).align(Alignment.BottomStart)
                 .graphicsLayer { alpha = blobAlpha; renderEffect = blurEffect(70f) }
-                .background(Brush.radialGradient(listOf(Color(0xFF24C78E), Color.Transparent)), CircleShape)
+                .background(Brush.radialGradient(listOf(Color(0xFF10B981), Color.Transparent)), CircleShape)
         )
         content()
     }
@@ -835,7 +835,10 @@ private fun F2LProgressBar(progress: Float, color: Color, height: androidx.compo
         Box(
             Modifier.fillMaxHeight().fillMaxWidth(animated.coerceIn(0.03f, 1f))
                 .clip(RoundedCornerShape(50))
-                .background(Brush.horizontalGradient(listOf(color.copy(alpha = 0.75f), color)))
+                .background(Brush.horizontalGradient(
+                    if (color == AccentBlue) listOf(color, androidx.compose.ui.graphics.lerp(color, Color(0xFFA3E635), 0.6f))
+                    else listOf(color.copy(alpha = 0.75f), color)
+                ))
         )
     }
 }
@@ -1442,7 +1445,22 @@ private fun AddDownloadScreen(
                 Spacer(Modifier.height(24.dp))
 
                 // Submit Button
-                if (modeTab == 0) {
+                val isYoutubeUrl = modeTab == 0 && YtDlpEngine.isYoutube(url.trim())
+                if (isYoutubeUrl) {
+                    YouTubePanel(
+                        url = url.trim(),
+                        accent = AccentBlue,
+                        textPrimary = TextPrimary,
+                        textSecondary = TextSecondary,
+                        surface = Surface2,
+                        canAdd = folder != null && !isSubmitting,
+                        onAdd = { info, option ->
+                            isSubmitting = true
+                            vm.addYoutube(url.trim(), folder ?: Uri.EMPTY, info, option, autoStart)
+                            onBack()
+                        }
+                    )
+                } else if (modeTab == 0) {
                     val isAlreadyDownloading = existingItem?.status == DownloadItem.Status.DOWNLOADING || existingItem?.status == DownloadItem.Status.QUEUED
                     Button(
                         onClick = {

@@ -12,8 +12,11 @@ android {
         applicationId = "com.f2l.downloader"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "3.5.0"
+
+        // yt-dlp bundles python + ffmpeg per CPU; keep phones only (x86 emulators dropped) to limit APK size
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
+        versionCode = 13
+        versionName = "3.6.0"
     }
 
     // Signed release builds (used by .github/workflows/release.yml). Keystore comes from env vars / GitHub Secrets.
@@ -51,6 +54,7 @@ android {
     }
 
     packaging {
+        jniLibs { useLegacyPackaging = true }   // yt-dlp needs the native libs extracted to disk
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
@@ -69,6 +73,8 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
+    implementation("io.github.junkfood02.youtubedl-android:ffmpeg:0.18.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     debugImplementation(platform("androidx.compose:compose-bom:2024.12.01"))
     debugImplementation("androidx.compose.ui:ui-tooling")
