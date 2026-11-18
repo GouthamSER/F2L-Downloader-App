@@ -34,3 +34,6 @@ Never commit it to git.
 - Fix HTTP 429: one connection per file; 429/503 now wait and retry (honors Retry-After).
 - No more `.f2l.part` files: download writes into the final file and resumes from its length.
 - Old leftover part files are converted or deleted on next start; delete removes everything.
+
+## v3.6.2
+- Fix "Couldn't write the file to your folder": illegal characters (: * ? " < > | /) and very long names are cleaned before the file is created. Old failed items are fixed on Retry.

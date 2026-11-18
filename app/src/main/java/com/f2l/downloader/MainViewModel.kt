@@ -205,11 +205,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (autoStart) start(item)
     }
 
+    /**
+     * Server / Telegram names often hold characters Android storage refuses (": * ? " < > | / \\", control chars)
+     * or are far too long -> createFile() returns null -> "Couldn't write the file to your folder".
+     */
+    private fun sanitizeFileName(raw: String): String {
+        val n = raw.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim().trim('.', ' ')
+        if (n.isEmpty()) return "download-${System.currentTimeMillis()}.bin"
+        val dot = n.lastIndexOf('.')
+        val ext = if (dot > 0 && n.length - dot <= 8) n.substring(dot) else ""
+        var base = if (ext.isEmpty()) n else n.substring(0, dot)
+        if (base.length > 120) base = base.substring(0, 120).trim()
+        return base + ext
+    }
+
     private fun getUniqueFileName(
         tree: androidx.documentfile.provider.DocumentFile,
-        baseName: String,
+        rawName: String,
         url: String
     ): String {
+        val baseName = sanitizeFileName(rawName)
         val existingFile = tree.findFile(baseName) ?: return baseName
         val existingItem = _items.value.find { it.url.equals(url, ignoreCase = true) && it.fileName == baseName }
         if (existingItem != null) return baseName
@@ -259,12 +276,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             update(item.id) { it.copy(status = DownloadItem.Status.PAUSED, error = WAIT_WIFI, speedBytesPerSec = 0) }
             return
         }
-        update(item.id) { it.copy(status = DownloadItem.Status.DOWNLOADING, error = null) }
+        // old items may still carry an illegal name (":" etc.) -> fix it before the engine tries to create the file
+        val safeName = if (item.isTorrent) item.fileName else sanitizeFileName(item.fileName)
+        update(item.id) { it.copy(status = DownloadItem.Status.DOWNLOADING, error = null, fileName = safeName) }
         val i = Intent(getApplication(), DownloadService::class.java).apply {
             action = DownloadService.ACTION_START
             putExtra("id", item.id)
             putExtra("url", item.url)
-            putExtra("name", item.fileName)
+            putExtra("name", safeName)
             putExtra("tree", item.folderUri)
             putExtra("connections", item.connections)
             putExtra("retryAttempts", settings.retryAttempts)
