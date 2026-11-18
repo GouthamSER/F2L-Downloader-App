@@ -146,7 +146,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             url = clean,
             fileName = uniqueName,
             folderUri = folder.toString(),
-            connections = if (isMagnet) 1 else connections.coerceIn(1, 16),
+            connections = 1, // single connection, single resumable file (server limits parallel streams per IP)
             status = if (autoStart) DownloadItem.Status.QUEUED else DownloadItem.Status.PAUSED,
             userAgent = userAgent?.trim()?.takeIf { it.isNotEmpty() },
             referer = referer?.trim()?.takeIf { it.isNotEmpty() },

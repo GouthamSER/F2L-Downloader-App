@@ -913,7 +913,7 @@ private fun DownloadCard(
                         }
                     }
                     Text(
-                        "${formatBytes(item.totalBytes)} · ${if (item.isTorrent) "BitTorrent" else "${item.connections} threads"}",
+                        "${formatBytes(item.totalBytes)} · ${if (item.isTorrent) "BitTorrent" else "Single connection"}",
                         color = TextSecondary, style = MaterialTheme.typography.labelSmall
                     )
                 }
@@ -1895,7 +1895,7 @@ private fun DownloadDetailScreen(
                         }
                         DetailRow(
                             stringResource(R.string.detail_connections),
-                            if (item.isTorrent) "BitTorrent protocol" else "${item.connections} threads"
+                            if (item.isTorrent) "BitTorrent protocol" else "Single connection"
                         )
                         DetailRow(stringResource(R.string.detail_filename), item.fileName)
                         DetailRow(stringResource(R.string.detail_save_folder), Uri.parse(item.folderUri).lastPathSegment ?: item.folderUri)

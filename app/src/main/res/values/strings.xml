@@ -38,7 +38,7 @@
     <string name="action_choose_folder">Choose folder</string>
     <string name="folder_selected">Folder selected</string>
     <string name="label_connections">Connections</string>
-    <string name="connections_hint">More connections = faster download (works best for large files)</string>
+    <string name="connections_hint">Downloads now use one connection per file (resumable, no part files). Server limits parallel streams.</string>
     <string name="label_start_immediately">Start download immediately</string>
     <string name="action_start_download">Start download</string>
     <string name="action_add_to_queue">Add to queue</string>

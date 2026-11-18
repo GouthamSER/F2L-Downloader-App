@@ -29,3 +29,8 @@ Never commit it to git.
 ## Notes
 - Users on the old **debug** APK must uninstall once and install the first signed release (different signing key). After that, updates install over the top.
 - First update: Android asks the user to allow "Install unknown apps" for F2L.
+
+## v3.6.1
+- Fix HTTP 429: one connection per file; 429/503 now wait and retry (honors Retry-After).
+- No more `.f2l.part` files: download writes into the final file and resumes from its length.
+- Old leftover part files are converted or deleted on next start; delete removes everything.

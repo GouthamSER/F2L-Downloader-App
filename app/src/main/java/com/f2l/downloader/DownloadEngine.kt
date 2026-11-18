@@ -12,7 +12,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
@@ -35,8 +34,6 @@ class DownloadEngine(private val context: Context) {
     data class Progress(val downloaded: Long, val total: Long, val speed: Long) {
         companion object { const val FINALIZING = -1L }
     }
-
-    private class RangeRefusedException(msg: String) : Exception(msg)
 
     companion object {
         fun isMagnet(url: String): Boolean = url.trim().startsWith("magnet:", ignoreCase = true)
@@ -118,6 +115,8 @@ class DownloadEngine(private val context: Context) {
             404 -> "File not found (HTTP 404)"
             410 -> "File no longer available (HTTP 410)"
             416 -> "Range not satisfiable (file may have changed)"
+            429 -> "Server busy (HTTP 429) - too many connections. Wait a moment, then retry."
+            503 -> "Server busy (HTTP 503). Wait a moment, then retry."
             in 500..599 -> "Server error (HTTP $code)"
             else -> "HTTP $code"
         }
@@ -150,6 +149,15 @@ class DownloadEngine(private val context: Context) {
             watcher.cancel()
         }
     }
+
+    /** Wait time before retrying a 429/503. Honors Retry-After, else 2s,4s,8s,16s (capped 20s). */
+    private fun retryAfterMs(response: Response, tries: Int): Long {
+        val header = response.header("Retry-After")?.trim()?.toLongOrNull()
+        val base = if (header != null) header * 1000L else 2000L shl min(tries, 3)
+        return base.coerceIn(1000L, 20000L)
+    }
+
+    private fun isBusy(code: Int) = code == 429 || code == 503
 
     private fun applyCustomHeaders(
         builder: Request.Builder,
@@ -247,62 +255,33 @@ class DownloadEngine(private val context: Context) {
             return@withContext
         }
 
-        // Standard HTTP / HTTPS download
+        // Standard HTTP / HTTPS download: ONE connection, ONE file, resumable (no part files).
         val headReq = Request.Builder().url(clean).head().apply {
             applyCustomHeaders(this, userAgent, referer, customHeaders)
         }.build()
 
         var headCode = 0
         var total = -1L
-        var ranges = false
-        client.newCall(headReq).executeCancellable { head ->
-            headCode = head.code
-            total = head.header("Content-Length")?.toLongOrNull() ?: -1L
-            ranges = head.header("Accept-Ranges")?.contains("bytes", true) == true
+        var headTries = 0
+        while (true) {
+            var retryMs = -1L
+            client.newCall(headReq).executeCancellable { head ->
+                headCode = head.code
+                total = head.header("Content-Length")?.toLongOrNull() ?: -1L
+                if (isBusy(head.code)) retryMs = retryAfterMs(head, headTries)
+            }
+            if (retryMs < 0) break
+            if (++headTries > 8) error(httpErrorMessage(headCode))
+            delay(retryMs)
         }
         if (headCode !in 200..299 && headCode != 405) {
             error(httpErrorMessage(headCode))
         }
 
-        // Remove orphan temp files left by older pause/resume runs (e.g. "name.f2l.part.mp4", "name.f2l.part (1)")
-        removeStrayParts(tree, fileName)
+        // Old app versions left "<name>.f2l.part*" files. Convert/remove them once, never create new ones.
+        migrateLegacyParts(tree, fileName)
 
-        // Check if the destination file is already completely downloaded
-        val existingFinal = tree.findFile(fileName)
-        if (existingFinal != null && existingFinal.exists()) {
-            val existingLen = existingFinal.length()
-            if (total > 0 && existingLen == total) {
-                // File is already fully downloaded! Clean up any leftover segments and complete
-                cleanupPartFiles(tree, fileName)
-                onProgress(Progress(total, total, 0))
-                return@withContext
-            }
-        }
-
-        // A single-connection temp file with data means an earlier run already fell back to 1 connection: keep resuming it
-        val singlePartLen = tree.findFile("$fileName.f2l.part")?.length() ?: 0L
-        if (total > 0 && ranges && connections > 1 && singlePartLen <= 0L) {
-            try {
-                segmented(clean, fileName, tree, total, min(connections, 16), userAgent, referer, customHeaders, onProgress)
-            } catch (e: CancellationException) {
-                // Pause / cancel: keep segment files for resume, never fall back
-                throw e
-            } catch (e: Exception) {
-                // Pause closes the socket -> IOException("Canceled"); that is a pause, not a failure: never wipe parts
-                coroutineContext.ensureActive()
-                // Server refuses parallel ranges, or segments barely started: use 1 connection and drop the empty segment files.
-                // Otherwise (real progress made, e.g. network blip) rethrow so the retry loop resumes the segments.
-                val got = segmentBytes(tree, fileName)
-                if (e is RangeRefusedException || got < total / 20) {
-                    removeSegmentParts(tree, fileName)
-                    single(clean, fileName, tree, total, userAgent, referer, customHeaders, onProgress)
-                } else {
-                    throw e
-                }
-            }
-        } else {
-            single(clean, fileName, tree, total, userAgent, referer, customHeaders, onProgress)
-        }
+        single(clean, fileName, tree, total, userAgent, referer, customHeaders, onProgress)
     }
 
     private suspend fun downloadMagnet(
@@ -327,7 +306,7 @@ class DownloadEngine(private val context: Context) {
         var downloadedTorrent = false
         for (cacheUrl in cacheUrls) {
             try {
-                val req = Request.Builder().url(cacheUrl).header("User-Agent", "F2LDownloader/3.2.0").build()
+                val req = Request.Builder().url(cacheUrl).header("User-Agent", "F2LDownloader/3.6.1").build()
                 client.newCall(req).execute().use { res ->
                     if (res.isSuccessful) {
                         res.body?.bytes()?.let { bytes ->
@@ -393,40 +372,23 @@ class DownloadEngine(private val context: Context) {
         onProgress(Progress(100, 100, 0))
     }
 
-    private fun segmentRegex(fileName: String) = Regex("^" + Regex.escape("$fileName.f2l.part") + "\\d{1,2}$")
-
-    private fun segmentBytes(tree: DocumentFile, fileName: String): Long = try {
-        val re = segmentRegex(fileName)
-        tree.listFiles().filter { f -> f.name?.let { re.matches(it) } == true }.sumOf { it.length().coerceAtLeast(0L) }
-    } catch (_: Exception) { 0L }
-
-    private fun removeSegmentParts(tree: DocumentFile, fileName: String) {
-        try {
-            val re = segmentRegex(fileName)
-            tree.listFiles().forEach { f -> if (f.name?.let { re.matches(it) } == true) f.delete() }
-        } catch (_: Exception) {}
-    }
-
-    /** Delete temp files that start with "<name>.f2l.part" but are not one of our exact part names. */
-    private fun removeStrayParts(tree: DocumentFile, fileName: String) {
+    /**
+     * Old versions wrote "<name>.f2l.part" (single) and "<name>.f2l.part0..N" (segments).
+     * Single part with data -> becomes the real file (so the old download resumes). Everything else -> deleted.
+     */
+    private fun migrateLegacyParts(tree: DocumentFile, fileName: String) {
         try {
             val prefix = "$fileName.f2l.part"
-            val valid = Regex("^" + Regex.escape(prefix) + "(\\d{1,2})?$")
-            tree.listFiles().forEach { f ->
-                val n = f.name ?: return@forEach
-                if (n.startsWith(prefix) && !valid.matches(n)) f.delete()
-            }
-        } catch (_: Exception) {}
-    }
-
-    private fun cleanupPartFiles(tree: DocumentFile, fileName: String) {
-        try {
-            tree.listFiles().forEach { f ->
-                val n = f.name ?: return@forEach
-                if (n == "$fileName.f2l.part" || (n.startsWith("$fileName.f2l.part") && n != fileName)) {
-                    f.delete()
+            val all = tree.listFiles().filter { it.name?.startsWith(prefix) == true }
+            if (all.isEmpty()) return
+            val main = all.firstOrNull { it.name == prefix }
+            if (main != null && tree.findFile(fileName) == null && main.length() > 0) {
+                if (main.renameTo(fileName)) {
+                    all.filter { it.name != prefix }.forEach { it.delete() }
+                    return
                 }
             }
+            all.forEach { it.delete() }
         } catch (_: Exception) {}
     }
 
@@ -440,224 +402,95 @@ class DownloadEngine(private val context: Context) {
         customHeaders: String?,
         onProgress: (Progress) -> Unit
     ) {
-        val partName = "$fileName.f2l.part"
-        // octet-stream keeps the exact name; a real mime makes SAF append an extension (name.f2l.part.mp4)
-        // so findFile() missed it on resume and a new temp file was created every time.
-        val part = tree.findFile(partName) ?: tree.createFile("application/octet-stream", partName)
-        ?: error("Cannot create temporary download file — verify permissions or disk space")
+        // The download writes straight into the final file and resumes from its length. No temp/part files.
+        // octet-stream keeps the exact name (a real mime makes SAF append an extension, then findFile() misses
+        // it on resume and a new file is created on every retry).
+        var file = tree.findFile(fileName)
+        if (file == null) {
+            val created = tree.createFile("application/octet-stream", fileName)
+                ?: error("Cannot create file - verify permissions or disk space")
+            if (created.name != fileName) {
+                if (!created.renameTo(fileName)) {
+                    created.delete()
+                    error("Cannot create file with the exact name - verify permissions")
+                }
+            }
+            file = tree.findFile(fileName) ?: error("Cannot create file - verify permissions or disk space")
+        }
+        val target: DocumentFile = file
 
-        var existing = part.length().coerceAtLeast(0L)
+        var existing = target.length().coerceAtLeast(0L)
         if (total > 0L && existing > total) {
-            // corrupt / changed file: start over
-            context.contentResolver.openFileDescriptor(part.uri, "wt")?.use {}
+            // changed / corrupt file: start over
+            context.contentResolver.openFileDescriptor(target.uri, "wt")?.use {}
             existing = 0L
         }
 
-        // Part already complete (app was killed while finalizing): do NOT send Range (server answers 416) - just finalize.
+        // Already complete: do NOT send Range (server answers 416)
         if (!(total > 0L && existing == total)) {
             val request = Request.Builder().url(url).apply {
                 applyCustomHeaders(this, userAgent, referer, customHeaders)
                 if (existing > 0) header("Range", "bytes=$existing-")
             }.build()
 
-            client.newCall(request).executeCancellable { response ->
-                // 416 with data on disk and unknown total = part already holds the whole file
-                val alreadyDone = response.code == 416 && existing > 0 && total <= 0L
-                if (!alreadyDone && !response.isSuccessful && response.code != 206) {
-                    error(httpErrorMessage(response.code))
-                }
-                if (!alreadyDone) {
-                    if (response.code != 206 && existing > 0) {
-                        context.contentResolver.openFileDescriptor(part.uri, "wt")?.use {}
+            var busyTries = 0
+            while (true) {
+                var retryMs = -1L
+                client.newCall(request).executeCancellable { response ->
+                    // 429 / 503: server is full. Wait and retry here, do not count as a failed download.
+                    if (isBusy(response.code)) {
+                        retryMs = retryAfterMs(response, busyTries)
+                        return@executeCancellable
                     }
-                    response.body?.byteStream()?.use { input ->
-                        val output = context.contentResolver.openOutputStream(part.uri, "wa")
-                            ?: error("Cannot open output stream for writing")
-                        output.use { out ->
-                            val buffer = ByteArray(256 * 1024)
-                            var downloaded = if (response.code == 206) existing else 0L
-                            var last = downloaded
-                            var lastT = System.nanoTime()
-                            while (true) {
-                                coroutineContext.ensureActive()
-                                val n = input.read(buffer)
-                                if (n < 0) break
-                                out.write(buffer, 0, n)
-                                downloaded += n
-                                val now = System.nanoTime()
-                                if (now - lastT > 500_000_000L) {
-                                    val sec = (now - lastT) / 1e9
-                                    onProgress(Progress(downloaded, total, ((downloaded - last) / sec).toLong()))
-                                    last = downloaded
-                                    lastT = now
+                    // 416 with data on disk and unknown total = file already holds everything
+                    val alreadyDone = response.code == 416 && existing > 0 && total <= 0L
+                    if (!alreadyDone && !response.isSuccessful && response.code != 206) {
+                        error(httpErrorMessage(response.code))
+                    }
+                    if (!alreadyDone) {
+                        if (response.code != 206 && existing > 0) {
+                            // server ignored Range: restart file from 0
+                            context.contentResolver.openFileDescriptor(target.uri, "wt")?.use {}
+                            existing = 0L
+                        }
+                        response.body?.byteStream()?.use { input ->
+                            val output = context.contentResolver.openOutputStream(target.uri, "wa")
+                                ?: error("Cannot open output stream for writing")
+                            output.use { out ->
+                                val buffer = ByteArray(256 * 1024)
+                                var downloaded = existing
+                                var last = downloaded
+                                var lastT = System.nanoTime()
+                                while (true) {
+                                    coroutineContext.ensureActive()
+                                    val n = input.read(buffer)
+                                    if (n < 0) break
+                                    out.write(buffer, 0, n)
+                                    downloaded += n
+                                    val now = System.nanoTime()
+                                    if (now - lastT > 500_000_000L) {
+                                        val sec = (now - lastT) / 1e9
+                                        onProgress(Progress(downloaded, total, ((downloaded - last) / sec).toLong()))
+                                        last = downloaded
+                                        lastT = now
+                                    }
                                 }
+                                onProgress(Progress(downloaded, total, 0))
                             }
-                            onProgress(Progress(downloaded, total, 0))
                         }
                     }
                 }
+                if (retryMs < 0) break
+                if (++busyTries > 10) error(httpErrorMessage(429))
+                delay(retryMs)
             }
         }
 
-        val completed = part.length()
+        val completed = target.length()
         if (total > 0L && completed < total) {
             // Server closed the stream early. Throw so the retry loop resumes instead of marking a half file as done.
             throw java.io.IOException("unexpected end of stream")
         }
-        onProgress(Progress(completed, total, Progress.FINALIZING))
-        val final = tree.findFile(fileName)
-        if (final != null && final.canWrite()) {
-            // copy first, delete part only after the copy fully succeeded (kill mid-copy -> part still intact)
-            context.contentResolver.openOutputStream(final.uri, "wt")?.use { sink ->
-                context.contentResolver.openInputStream(part.uri)?.use { input ->
-                    input.copyTo(sink, 256 * 1024)
-                }
-            }
-            part.delete()
-        } else {
-            final?.delete()
-            if (!part.renameTo(fileName)) {
-                val newFile = tree.createFile(guessMime(fileName), fileName)
-                    ?: error("Cannot finalize completed download file")
-                context.contentResolver.openOutputStream(newFile.uri, "wt")?.use { sink ->
-                    context.contentResolver.openInputStream(part.uri)?.use { input ->
-                        input.copyTo(sink, 256 * 1024)
-                    }
-                }
-                part.delete()
-            }
-        }
-        cleanupPartFiles(tree, fileName)
         onProgress(Progress(completed, total, 0))
-    }
-
-    private suspend fun segmented(
-        url: String,
-        fileName: String,
-        tree: DocumentFile,
-        total: Long,
-        count: Int,
-        userAgent: String?,
-        referer: String?,
-        customHeaders: String?,
-        onProgress: (Progress) -> Unit
-    ) = coroutineScope {
-        val chunk = (total + count - 1) / count
-        val downloadedTotal = java.util.concurrent.atomic.AtomicLong(0L)
-
-        val reporter = launch {
-            var last = 0L
-            var lastT = System.nanoTime()
-            while (isActive) {
-                delay(500)
-                val now = System.nanoTime()
-                val downloaded = downloadedTotal.get()
-                val sec = (now - lastT) / 1e9
-                val speed = if (sec > 0) ((downloaded - last) / sec).toLong() else 0L
-                onProgress(Progress(downloaded, total, speed))
-                last = downloaded
-                lastT = now
-            }
-        }
-
-        data class Segment(val index: Int, val start: Long, val end: Long, val part: DocumentFile, val existing: Long)
-        val segments = (0 until count).map { index ->
-            val start = index * chunk
-            val end = min(total - 1, start + chunk - 1)
-            val partName = "$fileName.f2l.part$index"
-            var part = tree.findFile(partName)
-                ?: tree.createFile("application/octet-stream", partName)
-                ?: error("Cannot create segment $index — check storage space")
-
-            var existing = part.length().coerceAtLeast(0L)
-            val expected = end - start + 1
-            if (existing > expected) {
-                part.delete()
-                part = tree.createFile("application/octet-stream", partName) ?: error("Cannot recreate segment $index")
-                existing = 0L
-            }
-            if (existing > 0) downloadedTotal.addAndGet(existing)
-            Segment(index, start, end, part, existing)
-        }
-
-        val jobs = segments.map { seg ->
-            launch(Dispatchers.IO) {
-                val expected = seg.end - seg.start + 1
-                if (seg.existing < expected) {
-                    downloadRange(url, seg.part, seg.start, seg.end, seg.existing, downloadedTotal, userAgent, referer, customHeaders)
-                }
-            }
-        }
-        jobs.joinAll()
-        reporter.cancel()
-        onProgress(Progress(downloadedTotal.get(), total, Progress.FINALIZING))
-
-        val existingFinal = tree.findFile(fileName)
-        val output = if (existingFinal != null && existingFinal.canWrite()) {
-            existingFinal
-        } else {
-            existingFinal?.delete()
-            tree.createFile(guessMime(fileName), fileName)
-                ?: error("Cannot create final file")
-        }
-        val out = context.contentResolver.openOutputStream(output.uri, "wt")
-            ?: error("Cannot open final file")
-        // Parts are deleted ONLY after the whole merge worked. Before, each part was deleted right after copy,
-        // so an app kill mid-merge lost data and the next run downloaded everything again from 0.
-        out.use { sink ->
-            for (i in 0 until count) {
-                coroutineContext.ensureActive()
-                val part = tree.findFile("$fileName.f2l.part$i") ?: error("Missing segment $i")
-                context.contentResolver.openInputStream(part.uri)?.use { input ->
-                    input.copyTo(sink, 256 * 1024)
-                } ?: error("Cannot read segment $i")
-            }
-        }
-        val written = tree.findFile(fileName)?.length() ?: -1L
-        if (written != total) {
-            throw java.io.IOException("merge incomplete ($written/$total), keeping parts")
-        }
-        cleanupPartFiles(tree, fileName)
-        onProgress(Progress(total, total, 0))
-    }
-
-    private suspend fun downloadRange(
-        url: String,
-        part: DocumentFile,
-        start: Long,
-        end: Long,
-        existing: Long,
-        downloadedTotal: java.util.concurrent.atomic.AtomicLong,
-        userAgent: String?,
-        referer: String?,
-        customHeaders: String?
-    ) {
-        val from = start + existing
-        val request = Request.Builder().url(url).apply {
-            applyCustomHeaders(this, userAgent, referer, customHeaders)
-            header("Range", "bytes=$from-$end")
-        }.build()
-
-        client.newCall(request).executeCancellable { response ->
-            if (response.code != 206) throw RangeRefusedException("Server refused range request (HTTP ${response.code})")
-            response.body?.byteStream()?.use { input ->
-                val out = context.contentResolver.openOutputStream(part.uri, "wa")
-                    ?: error("Cannot open segment output")
-                out.use { sink ->
-                    val buffer = ByteArray(128 * 1024)
-                    var got = existing
-                    while (got < end - start + 1) {
-                        coroutineContext.ensureActive()
-                        val wanted = min(buffer.size.toLong(), end - start + 1 - got).toInt()
-                        val n = input.read(buffer, 0, wanted)
-                        if (n < 0) break
-                        sink.write(buffer, 0, n)
-                        got += n
-                        downloadedTotal.addAndGet(n.toLong())
-                    }
-                    if (got < end - start + 1) throw java.io.IOException("unexpected end of stream")
-                }
-            }
-        }
     }
 }
