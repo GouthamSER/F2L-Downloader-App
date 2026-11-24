@@ -14,7 +14,26 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.LocalIndication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -202,7 +221,7 @@ class MainActivity : ComponentActivity() {
         }
         ContextCompat.registerReceiver(this, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
         setContent {
-            MaterialTheme(colorScheme = colorScheme()) {
+            MaterialTheme(colorScheme = colorScheme(), typography = AppTypography) {
                 F2LApp(vm, incomingUrl)
             }
         }
@@ -214,7 +233,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tab { HOME, DOWNLOADS, FILES, SETTINGS }
+private enum class Tab { HOME, YOUTUBE, DOWNLOADS, FILES, SETTINGS }
 private enum class StatusFilter { ALL, ACTIVE, COMPLETED, FAILED }
 
 @Composable
@@ -254,6 +273,30 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
     }
 
     val items by vm.items.collectAsStateWithLifecycle()
+    val haptic = LocalHapticFeedback.current
+    val appContext = LocalContext.current
+    val snackbar = remember { SnackbarHostState() }
+    val uiScope = rememberCoroutineScope()
+    val statusMemo = remember { mutableMapOf<Long, DownloadItem.Status>() }
+    // Live feedback: buzz + snackbar when a download finishes or fails
+    LaunchedEffect(items) {
+        items.forEach { d ->
+            val prev = statusMemo[d.id]
+            if (prev == DownloadItem.Status.DOWNLOADING && d.status != prev) {
+                if (d.status == DownloadItem.Status.COMPLETED) {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    uiScope.launch {
+                        val r = snackbar.showSnackbar("Done: ${d.fileName}", actionLabel = "Open", duration = SnackbarDuration.Short)
+                        if (r == SnackbarResult.ActionPerformed) openDownloadedFile(appContext, d)
+                    }
+                } else if (d.status == DownloadItem.Status.FAILED) {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    uiScope.launch { snackbar.showSnackbar("Failed: ${d.fileName}", duration = SnackbarDuration.Short) }
+                }
+            }
+            statusMemo[d.id] = d.status
+        }
+    }
     var tab by remember { mutableStateOf(Tab.HOME) }
     var showAddScreen by remember { mutableStateOf(sharedUrl.isNotBlank()) }
     var prefillUrl by remember { mutableStateOf(sharedUrl) }
@@ -348,10 +391,15 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
                     Text("F2L", color = TextPrimary, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 }
             },
+            snackbarHost = { SnackbarHost(snackbar) },
             floatingActionButton = {
-                if (tab == Tab.HOME || tab == Tab.DOWNLOADS) {
+                AnimatedVisibility(
+                    visible = tab == Tab.HOME || tab == Tab.DOWNLOADS,
+                    enter = scaleIn(spring(dampingRatio = Spring.DampingRatioMediumBouncy)) + fadeIn(),
+                    exit = scaleOut() + fadeOut()
+                ) {
                     FloatingActionButton(
-                        onClick = { prefillUrl = ""; showAddScreen = true },
+                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); prefillUrl = ""; showAddScreen = true },
                         containerColor = Color.Transparent,
                         modifier = Modifier.glass(radius = 20.dp)
                     ) {
@@ -359,7 +407,12 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
                     }
                 }
             },
-            bottomBar = { BottomBar(tab) { tab = it } }
+            bottomBar = {
+                BottomBar(tab) {
+                    if (it != tab) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    tab = it
+                }
+            }
         ) { pad ->
             Column(Modifier.padding(pad).fillMaxSize()) {
                 val copied = clipUrl
@@ -371,11 +424,14 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
                     )
                 }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
-                    when (tab) {
-                        Tab.HOME -> DownloadListScreen(items, showFilters = true, filterDefault = StatusFilter.ALL, vm = vm)
-                        Tab.DOWNLOADS -> DownloadListScreen(items, showFilters = false, filterDefault = StatusFilter.ACTIVE, vm = vm)
-                        Tab.FILES -> FilesScreen(items)
-                        Tab.SETTINGS -> SettingsScreen(vm)
+                    Crossfade(targetState = tab, animationSpec = tween(220), label = "tab") { t ->
+                        when (t) {
+                            Tab.HOME -> DownloadListScreen(items, showFilters = true, filterDefault = StatusFilter.ALL, vm = vm)
+                            Tab.YOUTUBE -> YouTubeScreen(vm, items)
+                            Tab.DOWNLOADS -> DownloadListScreen(items, showFilters = false, filterDefault = StatusFilter.ACTIVE, vm = vm)
+                            Tab.FILES -> FilesScreen(items)
+                            Tab.SETTINGS -> SettingsScreen(vm)
+                        }
                     }
                 }
             }
@@ -481,6 +537,13 @@ private fun OnboardingScreen(onDone: (Uri?) -> Unit) {
 
 @Composable
 private fun SplashScreen() {
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { shown = true }
+    val logoScale by animateFloatAsState(
+        if (shown) 1f else 0.55f,
+        spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow), label = "logoScale"
+    )
+    val logoAlpha by animateFloatAsState(if (shown) 1f else 0f, tween(600), label = "logoAlpha")
     Box(
         Modifier.fillMaxSize().background(BgDark),
         contentAlignment = Alignment.Center
@@ -489,7 +552,9 @@ private fun SplashScreen() {
             Image(
                 painter = painterResource(R.drawable.f2l_logo),
                 contentDescription = "F2L Downloader",
-                modifier = Modifier.size(120.dp).clip(RoundedCornerShape(28.dp))
+                modifier = Modifier.size(120.dp)
+                    .graphicsLayer { scaleX = logoScale; scaleY = logoScale; alpha = logoAlpha }
+                    .clip(RoundedCornerShape(28.dp))
             )
             Spacer(Modifier.height(20.dp))
             Text("F2L Downloader", color = TextPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -507,6 +572,95 @@ private fun SplashScreen() {
 }
 
 @Composable
+private fun YouTubeScreen(vm: MainViewModel, items: List<DownloadItem>) {
+    val haptic = LocalHapticFeedback.current
+    val clipboard = LocalClipboardManager.current
+    var section by remember { mutableIntStateOf(0) } // 0 = Download, 1 = My YouTube downloads
+    var url by remember { mutableStateOf("") }
+    var submitting by remember { mutableStateOf(false) }
+    val folder = remember { vm.settings.defaultFolderUri?.let { runCatching { Uri.parse(it) }.getOrNull() } }
+    val ytItems = remember(items) { items.filter { it.ytKind != null } }
+    val activeYt = ytItems.count { it.status == DownloadItem.Status.DOWNLOADING || it.status == DownloadItem.Status.QUEUED }
+    val clean = url.trim()
+    val isYt = clean.isNotBlank() && YtDlpEngine.isYoutube(clean)
+
+    Column(Modifier.fillMaxSize()) {
+        TabRow(
+            selectedTabIndex = section,
+            containerColor = Color.Transparent,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp).fillMaxWidth().glass(radius = 16.dp)
+        ) {
+            Tab(
+                selected = section == 0, onClick = { section = 0 },
+                text = { Text(stringResource(R.string.yt_tab_download)) },
+                selectedContentColor = AccentBlue, unselectedContentColor = TextSecondary
+            )
+            Tab(
+                selected = section == 1, onClick = { section = 1 },
+                text = { Text(stringResource(R.string.yt_tab_mine) + if (activeYt > 0) " ($activeYt)" else "") },
+                selectedContentColor = AccentBlue, unselectedContentColor = TextSecondary
+            )
+        }
+
+        if (section == 1) {
+            DownloadListScreen(ytItems, showFilters = false, filterDefault = StatusFilter.ALL, vm = vm)
+            return@Column
+        }
+
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.PlayCircle, null, tint = Color(0xFFFF3B30), modifier = Modifier.size(26.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.yt_title), color = TextPrimary, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(stringResource(R.string.yt_hint), color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(12.dp))
+
+            OutlinedTextField(
+                value = url, onValueChange = { url = it },
+                modifier = Modifier.fillMaxWidth(), singleLine = true,
+                placeholder = { Text("https://youtube.com/watch?v=…") },
+                leadingIcon = {
+                    IconButton(onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        clipboard.getText()?.text?.let { t ->
+                            url = vm.extractUrls(t).firstOrNull() ?: t.trim()
+                        }
+                    }) { Icon(Icons.Default.ContentPaste, stringResource(R.string.yt_paste), tint = AccentBlue) }
+                },
+                trailingIcon = {
+                    if (url.isNotBlank()) IconButton(onClick = { url = "" }) { Icon(Icons.Default.Clear, null, tint = TextSecondary) }
+                }
+            )
+            Spacer(Modifier.height(14.dp))
+
+            when {
+                folder == null -> Text(stringResource(R.string.yt_no_folder), color = RedErr, style = MaterialTheme.typography.bodySmall)
+                isYt -> YouTubePanel(
+                    url = clean,
+                    accent = AccentBlue,
+                    textPrimary = TextPrimary,
+                    textSecondary = TextSecondary,
+                    surface = Surface2,
+                    canAdd = !submitting,
+                    onAdd = { info, option ->
+                        submitting = true
+                        vm.addYoutube(clean, folder, info, option, true)
+                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                        url = ""
+                        submitting = false
+                        section = 1
+                    }
+                )
+                clean.isNotBlank() -> Text(stringResource(R.string.yt_not_youtube), color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@Composable
 private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
     NavigationBar(
         containerColor = Color.Transparent,
@@ -514,6 +668,7 @@ private fun BottomBar(current: Tab, onSelect: (Tab) -> Unit) {
     ) {
         val entries = listOf(
             Triple(Tab.HOME, Icons.Default.Home, stringResource(R.string.nav_home)),
+            Triple(Tab.YOUTUBE, Icons.Default.PlayCircle, stringResource(R.string.nav_youtube)),
             Triple(Tab.DOWNLOADS, Icons.Default.Download, stringResource(R.string.nav_downloads)),
             Triple(Tab.FILES, Icons.Default.Folder, stringResource(R.string.nav_files)),
             Triple(Tab.SETTINGS, Icons.Default.Settings, stringResource(R.string.nav_settings))
@@ -734,6 +889,7 @@ private fun DownloadListScreen(
     vm: MainViewModel
 ) {
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     var filter by remember { mutableStateOf(filterDefault) }
     val filtered = items.filter {
         when (filter) {
@@ -788,7 +944,7 @@ private fun DownloadListScreen(
                     }
                     FilterChip(
                         selected = filter == f,
-                        onClick = { filter = f },
+                        onClick = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); filter = f },
                         label = { Text(label) },
                         colors = FilterChipDefaults.filterChipColors(
                             selectedContainerColor = AccentBlue, selectedLabelColor = Color.White,
@@ -800,26 +956,79 @@ private fun DownloadListScreen(
             Spacer(Modifier.height(16.dp))
         }
 
+        // Live summary bar: appears while something is downloading
+        val activeNow = items.filter { it.status == DownloadItem.Status.DOWNLOADING }
+        AnimatedVisibility(visible = activeNow.isNotEmpty(), enter = fadeIn() + scaleIn(initialScale = 0.9f), exit = fadeOut() + scaleOut(targetScale = 0.9f)) {
+            val totalSpeed = activeNow.sumOf { it.speedBytesPerSec.coerceAtLeast(0L) }
+            val dot by rememberInfiniteTransition(label = "dot").animateFloat(
+                0.3f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "dotAlpha"
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(bottom = 10.dp).glass(radius = 14.dp).padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(8.dp).alpha(dot).clip(CircleShape).background(AccentBlue))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${activeNow.size} downloading · ${formatBytes(totalSpeed)}/s",
+                    color = TextPrimary, style = MaterialTheme.typography.labelLarge
+                )
+            }
+        }
+
         if (filtered.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(stringResource(R.string.no_downloads_yet), color = TextSecondary)
+                val bob by rememberInfiniteTransition(label = "bob").animateFloat(
+                    0f, 1f, infiniteRepeatable(tween(1600, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "bobY"
+                )
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.CloudDownload, null, tint = AccentBlue.copy(alpha = 0.75f),
+                        modifier = Modifier.size(64.dp).graphicsLayer { translationY = -26f * bob }
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(stringResource(R.string.no_downloads_yet), color = TextSecondary)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Tap + or copy a link", color = TextSecondary.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
+                }
             }
         } else {
             LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 items(filtered, key = { it.id }) { item ->
-                    DownloadCard(
-                        item,
-                        onPause = { vm.pause(item) },
-                        onResume = { vm.start(item) },
-                        onDelete = { pendingDelete = item },
-                        onClick = {
-                            if (item.status == DownloadItem.Status.COMPLETED) openDownloadedFile(context, item)
-                            else selected = item
-                        },
-                        onOpen = { openDownloadedFile(context, item) },
-                        onShare = { shareDownloadedFile(context, item) },
-                        onShowFolder = { showInFolder(context, item) }
+                    // swipe left to delete (asks for confirmation, card snaps back)
+                    val dismissState = rememberSwipeToDismissBoxState(
+                        confirmValueChange = { v ->
+                            if (v == SwipeToDismissBoxValue.EndToStart) {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                pendingDelete = item
+                            }
+                            false
+                        }
                     )
+                    SwipeToDismissBox(
+                        state = dismissState,
+                        enableDismissFromStartToEnd = false,
+                        modifier = Modifier.animateItem(),
+                        backgroundContent = {
+                            Box(Modifier.fillMaxSize().padding(end = 24.dp), contentAlignment = Alignment.CenterEnd) {
+                                Icon(Icons.Default.Delete, null, tint = RedErr)
+                            }
+                        }
+                    ) {
+                        DownloadCard(
+                            item,
+                            onPause = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); vm.pause(item) },
+                            onResume = { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove); vm.start(item) },
+                            onDelete = { haptic.performHapticFeedback(HapticFeedbackType.LongPress); pendingDelete = item },
+                            onClick = {
+                                if (item.status == DownloadItem.Status.COMPLETED) openDownloadedFile(context, item)
+                                else selected = item
+                            },
+                            onOpen = { openDownloadedFile(context, item) },
+                            onShare = { shareDownloadedFile(context, item) },
+                            onShowFolder = { showInFolder(context, item) }
+                        )
+                    }
                 }
             }
         }
@@ -866,15 +1075,30 @@ private fun DownloadCard(
         DownloadItem.Status.CANCELED -> TextSecondary to stringResource(R.string.status_canceled)
     }
 
+    // alive: card squishes when pressed, icon pulses while downloading
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        if (pressed) 0.97f else 1f, spring(stiffness = Spring.StiffnessMedium), label = "press"
+    )
+    val iconPulse = if (item.status == DownloadItem.Status.DOWNLOADING) {
+        rememberInfiniteTransition(label = "pulse").animateFloat(
+            0.5f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "pulseA"
+        ).value
+    } else 1f
+
     Card(
-        Modifier.fillMaxWidth().glass(radius = 18.dp).clickable(onClick = onClick),
+        Modifier.fillMaxWidth()
+            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
+            .glass(radius = 18.dp)
+            .clickable(interactionSource = interaction, indication = LocalIndication.current, onClick = onClick),
         colors = CardDefaults.cardColors(containerColor = Color.Transparent),
         shape = RoundedCornerShape(18.dp)
     ) {
         Column(Modifier.padding(14.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Box(
-                    Modifier.size(38.dp).clip(RoundedCornerShape(10.dp)).background(
+                    Modifier.size(38.dp).alpha(iconPulse).clip(RoundedCornerShape(10.dp)).background(
                         if (item.isTorrent) PurpleMagnet.copy(alpha = 0.22f) else statusColor.copy(alpha = 0.18f)
                     ),
                     contentAlignment = Alignment.Center
@@ -939,13 +1163,16 @@ private fun DownloadCard(
                     "${formatBytes(item.downloadedBytes)} / ${formatBytes(item.totalBytes)}",
                     color = TextSecondary, style = MaterialTheme.typography.labelSmall
                 )
-                Text(statusLabel, color = statusColor, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+                Text(
+                    if (item.status == DownloadItem.Status.DOWNLOADING && item.totalBytes > 0) "${(progress * 100).toInt()}% · $statusLabel" else statusLabel,
+                    color = statusColor, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold
+                )
             }
             if (item.status == DownloadItem.Status.DOWNLOADING) {
                 Spacer(Modifier.height(4.dp))
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                     val speedText = if (item.speedBytesPerSec < 0) {
-                        "Finishing file — joining parts…"
+                        "Finishing…"
                     } else if (item.speedBytesPerSec > 0) {
                         "${formatBytes(item.speedBytesPerSec)}/s"
                     } else if (item.downloadedBytes > 0) {

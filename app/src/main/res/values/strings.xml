@@ -5,6 +5,14 @@
 
     <string name="nav_home">Home</string>
     <string name="nav_downloads">Downloads</string>
+    <string name="nav_youtube">YouTube</string>
+    <string name="yt_tab_download">Download</string>
+    <string name="yt_tab_mine">My YouTube</string>
+    <string name="yt_title">YouTube Downloader</string>
+    <string name="yt_hint">Paste a video, Shorts or playlist-item link. Pick MP3 or a video quality. Only download content you have the right to save.</string>
+    <string name="yt_paste">Paste</string>
+    <string name="yt_no_folder">Choose a download folder in Settings first.</string>
+    <string name="yt_not_youtube">That is not a YouTube link.</string>
     <string name="nav_files">Files</string>
     <string name="nav_settings">Settings</string>
 

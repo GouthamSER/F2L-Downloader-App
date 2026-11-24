@@ -37,3 +37,9 @@ Never commit it to git.
 
 ## v3.6.2
 - Fix "Couldn't write the file to your folder": illegal characters (: * ? " < > | /) and very long names are cleaned before the file is created. Old failed items are fixed on Retry.
+
+## v3.7.0
+- Alive UI: haptics, press-squish cards, pulsing active icon, live "N downloading - speed" bar, swipe-left to delete, animated list/tab/FAB/splash, bouncing empty state, snackbar + buzz when a download finishes or fails.
+
+## v3.7.1
+- Whole app now uses an Arial-style sans-serif font (bundled Liberation Sans) instead of the phone system font.
