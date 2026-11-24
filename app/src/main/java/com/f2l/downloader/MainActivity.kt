@@ -199,9 +199,9 @@ class MainActivity : ComponentActivity() {
                             speedBytesPerSec = 0,
                             etaSeconds = -1
                         )
-                    }
+                    }.also { vm.pumpYtQueue() }
                 DownloadService.ACTION_FAILED ->
-                    vm.update(id) { it.copy(status = DownloadItem.Status.FAILED, error = intent.getStringExtra("error"), speedBytesPerSec = 0) }
+                    vm.update(id) { it.copy(status = DownloadItem.Status.FAILED, error = intent.getStringExtra("error"), speedBytesPerSec = 0) }.also { vm.pumpYtQueue() }
             }
         }
     }
@@ -235,6 +235,7 @@ class MainActivity : ComponentActivity() {
 
 private enum class Tab { HOME, YOUTUBE, DOWNLOADS, FILES, SETTINGS }
 private enum class StatusFilter { ALL, ACTIVE, COMPLETED, FAILED }
+private enum class SortMode(val label: String) { NEWEST("Newest first"), OLDEST("Oldest first"), NAME("Name A–Z"), SIZE("Size (largest)") }
 
 @Composable
 fun F2LApp(vm: MainViewModel, sharedUrl: String) {
@@ -297,9 +298,14 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
             statusMemo[d.id] = d.status
         }
     }
-    var tab by remember { mutableStateOf(Tab.HOME) }
-    var showAddScreen by remember { mutableStateOf(sharedUrl.isNotBlank()) }
+    // A YouTube link shared into F2L opens the YouTube tab (quality picker); anything else opens the Add screen.
+    val sharedYt = remember(sharedUrl) {
+        vm.extractUrls(sharedUrl).firstOrNull()?.takeIf { YtDlpEngine.isYoutube(it) }
+    }
+    var tab by remember { mutableStateOf(if (sharedYt != null) Tab.YOUTUBE else Tab.HOME) }
+    var showAddScreen by remember { mutableStateOf(sharedUrl.isNotBlank() && sharedYt == null) }
     var prefillUrl by remember { mutableStateOf(sharedUrl) }
+    var ytPrefill by remember { mutableStateOf(sharedYt.orEmpty()) }
 
     var showOnboarding by remember { mutableStateOf(vm.settings.defaultFolderUri == null) }
     if (showOnboarding) {
@@ -317,7 +323,6 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
         AddDownloadScreen(
             vm = vm,
             initialUrl = prefillUrl,
-            defaultConnections = vm.settings.defaultConnections,
             defaultFolder = vm.settings.defaultFolderUri?.let { runCatching { Uri.parse(it) }.getOrNull() },
             onBack = { showAddScreen = false },
             onStart = { url, name, folder, connections, autoStart, userAgent, referer, customHeaders ->
@@ -419,7 +424,11 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
                 if (tab == Tab.HOME && copied != null) {
                     ClipboardBanner(
                         url = copied,
-                        onDownload = { prefillUrl = copied; dismissedClip = copied; clipUrl = null; showAddScreen = true },
+                        onDownload = {
+                            dismissedClip = copied; clipUrl = null
+                            if (YtDlpEngine.isYoutube(copied)) { ytPrefill = copied; tab = Tab.YOUTUBE }
+                            else { prefillUrl = copied; showAddScreen = true }
+                        },
                         onDismiss = { dismissedClip = copied; clipUrl = null }
                     )
                 }
@@ -427,7 +436,7 @@ fun F2LApp(vm: MainViewModel, sharedUrl: String) {
                     Crossfade(targetState = tab, animationSpec = tween(220), label = "tab") { t ->
                         when (t) {
                             Tab.HOME -> DownloadListScreen(items, showFilters = true, filterDefault = StatusFilter.ALL, vm = vm)
-                            Tab.YOUTUBE -> YouTubeScreen(vm, items)
+                            Tab.YOUTUBE -> YouTubeScreen(vm, items, ytPrefill)
                             Tab.DOWNLOADS -> DownloadListScreen(items, showFilters = false, filterDefault = StatusFilter.ACTIVE, vm = vm)
                             Tab.FILES -> FilesScreen(items)
                             Tab.SETTINGS -> SettingsScreen(vm)
@@ -572,17 +581,19 @@ private fun SplashScreen() {
 }
 
 @Composable
-private fun YouTubeScreen(vm: MainViewModel, items: List<DownloadItem>) {
+private fun YouTubeScreen(vm: MainViewModel, items: List<DownloadItem>, initialUrl: String = "") {
     val haptic = LocalHapticFeedback.current
     val clipboard = LocalClipboardManager.current
     var section by remember { mutableIntStateOf(0) } // 0 = Download, 1 = My YouTube downloads
-    var url by remember { mutableStateOf("") }
+    var url by remember(initialUrl) { mutableStateOf(initialUrl) }
     var submitting by remember { mutableStateOf(false) }
     val folder = remember { vm.settings.defaultFolderUri?.let { runCatching { Uri.parse(it) }.getOrNull() } }
     val ytItems = remember(items) { items.filter { it.ytKind != null } }
     val activeYt = ytItems.count { it.status == DownloadItem.Status.DOWNLOADING || it.status == DownloadItem.Status.QUEUED }
     val clean = url.trim()
     val isYt = clean.isNotBlank() && YtDlpEngine.isYoutube(clean)
+    val hasList = isYt && YtDlpEngine.isPlaylistUrl(clean)
+    var wholePlaylist by remember(clean) { mutableStateOf(YtDlpEngine.isPurePlaylist(clean)) }
 
     Column(Modifier.fillMaxSize()) {
         TabRow(
@@ -637,7 +648,29 @@ private fun YouTubeScreen(vm: MainViewModel, items: List<DownloadItem>) {
 
             when {
                 folder == null -> Text(stringResource(R.string.yt_no_folder), color = RedErr, style = MaterialTheme.typography.bodySmall)
-                isYt -> YouTubePanel(
+                hasList && wholePlaylist -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!YtDlpEngine.isPurePlaylist(clean)) {
+                        TextButton(onClick = { wholePlaylist = false }) { Text(stringResource(R.string.yt_single_only), color = AccentBlue) }
+                    }
+                    PlaylistPanel(
+                        url = clean,
+                        accent = AccentBlue,
+                        textPrimary = TextPrimary,
+                        textSecondary = TextSecondary,
+                        surface = Surface2,
+                        onAdd = { entries, option ->
+                            vm.addYoutubePlaylist(entries, folder, option)
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            url = ""
+                            section = 1
+                        }
+                    )
+                }
+                isYt -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (hasList) {
+                        TextButton(onClick = { wholePlaylist = true }) { Text(stringResource(R.string.yt_whole_playlist), color = AccentBlue) }
+                    }
+                    YouTubePanel(
                     url = clean,
                     accent = AccentBlue,
                     textPrimary = TextPrimary,
@@ -652,7 +685,8 @@ private fun YouTubeScreen(vm: MainViewModel, items: List<DownloadItem>) {
                         submitting = false
                         section = 1
                     }
-                )
+                    )
+                }
                 clean.isNotBlank() -> Text(stringResource(R.string.yt_not_youtube), color = TextSecondary, style = MaterialTheme.typography.bodySmall)
             }
             Spacer(Modifier.height(24.dp))
@@ -891,6 +925,9 @@ private fun DownloadListScreen(
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
     var filter by remember { mutableStateOf(filterDefault) }
+    var query by remember { mutableStateOf("") }
+    var sort by remember { mutableStateOf(SortMode.NEWEST) }
+    var sortMenu by remember { mutableStateOf(false) }
     val filtered = items.filter {
         when (filter) {
             StatusFilter.ALL -> true
@@ -898,7 +935,15 @@ private fun DownloadListScreen(
             StatusFilter.COMPLETED -> it.status == DownloadItem.Status.COMPLETED
             StatusFilter.FAILED -> it.status == DownloadItem.Status.FAILED
         }
-    }
+    }.filter { query.isBlank() || it.fileName.contains(query.trim(), ignoreCase = true) }
+        .let { list ->
+            when (sort) {
+                SortMode.NEWEST -> list.sortedByDescending { it.id }
+                SortMode.OLDEST -> list.sortedBy { it.id }
+                SortMode.NAME -> list.sortedBy { it.fileName.lowercase() }
+                SortMode.SIZE -> list.sortedByDescending { it.totalBytes }
+            }
+        }
 
     var selected by remember { mutableStateOf<DownloadItem?>(null) }
     var pendingDelete by remember { mutableStateOf<DownloadItem?>(null) }
@@ -956,6 +1001,32 @@ private fun DownloadListScreen(
             Spacer(Modifier.height(16.dp))
         }
 
+        // Search + sort
+        if (items.size > 1) {
+            Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = query, onValueChange = { query = it },
+                    modifier = Modifier.weight(1f), singleLine = true,
+                    placeholder = { Text("Search downloads") },
+                    leadingIcon = { Icon(Icons.Default.Search, null, tint = TextSecondary) },
+                    trailingIcon = {
+                        if (query.isNotEmpty()) IconButton(onClick = { query = "" }) { Icon(Icons.Default.Clear, null, tint = TextSecondary) }
+                    }
+                )
+                Box {
+                    IconButton(onClick = { sortMenu = true }) { Icon(Icons.Default.SwapVert, "Sort", tint = AccentBlue) }
+                    DropdownMenu(expanded = sortMenu, onDismissRequest = { sortMenu = false }) {
+                        SortMode.entries.forEach { m ->
+                            DropdownMenuItem(
+                                text = { Text(m.label + if (m == sort) "  ✓" else "") },
+                                onClick = { sort = m; sortMenu = false }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // Live summary bar: appears while something is downloading
         val activeNow = items.filter { it.status == DownloadItem.Status.DOWNLOADING }
         AnimatedVisibility(visible = activeNow.isNotEmpty(), enter = fadeIn() + scaleIn(initialScale = 0.9f), exit = fadeOut() + scaleOut(targetScale = 0.9f)) {
@@ -973,6 +1044,32 @@ private fun DownloadListScreen(
                     "${activeNow.size} downloading · ${formatBytes(totalSpeed)}/s",
                     color = TextPrimary, style = MaterialTheme.typography.labelLarge
                 )
+            }
+        }
+
+        // Bulk actions: only the ones that apply right now
+        val pausedNow = items.filter { it.status == DownloadItem.Status.PAUSED }
+        val failedNow = items.filter { it.status == DownloadItem.Status.FAILED }
+        if (activeNow.isNotEmpty() || pausedNow.isNotEmpty() || failedNow.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (activeNow.isNotEmpty()) {
+                    OutlinedButton(onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        activeNow.forEach { vm.pause(it) }
+                    }) { Text("Pause all (${activeNow.size})") }
+                }
+                if (pausedNow.isNotEmpty()) {
+                    OutlinedButton(onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        pausedNow.forEach { vm.start(it) }
+                    }) { Text("Resume all (${pausedNow.size})") }
+                }
+                if (failedNow.isNotEmpty()) {
+                    OutlinedButton(onClick = {
+                        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        failedNow.forEach { vm.start(it) }
+                    }) { Text("Retry failed (${failedNow.size})") }
+                }
             }
         }
 
@@ -1010,8 +1107,11 @@ private fun DownloadListScreen(
                         enableDismissFromStartToEnd = false,
                         modifier = Modifier.animateItem(),
                         backgroundContent = {
-                            Box(Modifier.fillMaxSize().padding(end = 24.dp), contentAlignment = Alignment.CenterEnd) {
-                                Icon(Icons.Default.Delete, null, tint = RedErr)
+                            // draw only while swiping, else it shows through the translucent glass card
+                            if (dismissState.dismissDirection == SwipeToDismissBoxValue.EndToStart) {
+                                Box(Modifier.fillMaxSize().padding(end = 24.dp), contentAlignment = Alignment.CenterEnd) {
+                                    Icon(Icons.Default.Delete, null, tint = RedErr)
+                                }
                             }
                         }
                     ) {
@@ -1285,7 +1385,6 @@ private fun FilesScreen(items: List<DownloadItem>) {
 private fun AddDownloadScreen(
     vm: MainViewModel,
     initialUrl: String,
-    defaultConnections: Int = 8,
     defaultFolder: Uri? = null,
     onBack: () -> Unit,
     onStart: (url: String, name: String, folder: Uri, connections: Int, autoStart: Boolean, userAgent: String?, referer: String?, customHeaders: String?) -> Unit,
@@ -1296,9 +1395,8 @@ private fun AddDownloadScreen(
     var batchText by remember { mutableStateOf("") }
     var fileName by remember { mutableStateOf("") }
     var folder by remember { mutableStateOf(defaultFolder) }
-    var connections by remember { mutableIntStateOf(defaultConnections) }
+    val connections = 1 // one resumable connection per file
     var autoStart by remember { mutableStateOf(true) }
-    var connectionsExpanded by remember { mutableStateOf(false) }
 
     // Advanced HTTP options
     var showAdvancedHttp by remember { mutableStateOf(false) }
@@ -1556,27 +1654,6 @@ private fun AddDownloadScreen(
                 }
                 Spacer(Modifier.height(16.dp))
 
-                // Parallel Connections (disabled for magnet downloads)
-                if (!isMagnetUrl || modeTab == 1) {
-                    Text(stringResource(R.string.label_connections), color = TextSecondary, style = MaterialTheme.typography.labelMedium)
-                    Spacer(Modifier.height(4.dp))
-                    Box {
-                        OutlinedButton(onClick = { connectionsExpanded = true }, modifier = Modifier.fillMaxWidth()) {
-                            Text("$connections threads" + if (connections == 8) " (recommended)" else "", color = TextPrimary, modifier = Modifier.weight(1f))
-                            Icon(Icons.Default.ArrowDropDown, null, tint = TextPrimary)
-                        }
-                        DropdownMenu(expanded = connectionsExpanded, onDismissRequest = { connectionsExpanded = false }) {
-                            listOf(2, 4, 6, 8, 16).forEach { n ->
-                                DropdownMenuItem(
-                                    text = { Text("$n threads" + if (n == 8) " (recommended)" else "") },
-                                    onClick = { connections = n; connectionsExpanded = false }
-                                )
-                            }
-                        }
-                    }
-                    Text(stringResource(R.string.connections_hint), color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-                    Spacer(Modifier.height(16.dp))
-                }
 
                 // ---- ADVANCED HTTP HEADERS ACCORDION ----
                 Card(
@@ -1755,10 +1832,10 @@ private fun SettingsScreen(vm: MainViewModel) {
     var notifications by remember { mutableStateOf(settings.notifications) }
     var autoResume by remember { mutableStateOf(settings.autoResume) }
     var retryAttempts by remember { mutableIntStateOf(settings.retryAttempts) }
-    var defaultConnections by remember { mutableIntStateOf(settings.defaultConnections) }
     var defaultFolder by remember { mutableStateOf(settings.defaultFolderUri) }
 
-    var connectionsMenu by remember { mutableStateOf(false) }
+    var speedLimit by remember { mutableIntStateOf(settings.speedLimitKBps) }
+    var speedMenu by remember { mutableStateOf(false) }
     var retryMenu by remember { mutableStateOf(false) }
     var appearanceMenu by remember { mutableStateOf(false) }
     var themeMode by remember { mutableStateOf(settings.themeMode) }
@@ -1798,14 +1875,14 @@ private fun SettingsScreen(vm: MainViewModel) {
         SettingsSection(title = stringResource(R.string.section_download_settings)) {
             Box {
                 SettingsRow(
-                    icon = Icons.Default.Speed, title = stringResource(R.string.row_parallel_connections),
-                    subtitle = "$defaultConnections" + if (defaultConnections == 8) " (recommended)" else "",
-                    onClick = { connectionsMenu = true }
+                    icon = Icons.Default.Speed, title = stringResource(R.string.row_speed_limit),
+                    subtitle = speedLabel(speedLimit),
+                    onClick = { speedMenu = true }
                 )
-                DropdownMenu(expanded = connectionsMenu, onDismissRequest = { connectionsMenu = false }) {
-                    listOf(2, 4, 6, 8, 16).forEach { n ->
-                        DropdownMenuItem(text = { Text("$n threads" + if (n == 8) " (recommended)" else "") }, onClick = {
-                            defaultConnections = n; settings.defaultConnections = n; connectionsMenu = false
+                DropdownMenu(expanded = speedMenu, onDismissRequest = { speedMenu = false }) {
+                    listOf(0, 256, 512, 1024, 2048, 5120, 10240).forEach { kb ->
+                        DropdownMenuItem(text = { Text(speedLabel(kb)) }, onClick = {
+                            speedLimit = kb; settings.speedLimitKBps = kb; speedMenu = false
                         })
                     }
                 }
@@ -1911,7 +1988,7 @@ private fun HelpScreen(onBack: () -> Unit) {
         "What happens when I pause and resume?" to "F2L keeps what is already downloaded and continues from there. The server must support resuming; if it does not, the file starts again.",
         "A download failed. What now?" to "Open the card and read the message — it tells you what to do. Then tap Retry. Common causes: no internet, no free space, or the folder permission was lost (pick the folder again in Settings).",
         "Where are my files?" to "In the folder you picked. Tap Folder on a finished download to open it, or use the Files tab.",
-        "What are threads / connections?" to "Each thread downloads a different part of the file at the same time. 8 is a good default. More is not always faster.",
+        "Why one connection?" to "Each file downloads over one resumable connection. No part files, and the server never limits you for opening many streams.",
         "What does Wi-Fi only do?" to "Downloads wait until you are on Wi-Fi, then start by themselves. Turn it off in Settings to use mobile data.",
         "Do magnet links work?" to "F2L saves the .torrent file (or a .magnet file) for your torrent app. It does not download the torrent contents itself.",
         "A site says access denied (403)." to "Open Add download, expand HTTP Headers & Network, and set the Referer, User-Agent, or Cookie the site expects.",
@@ -1945,6 +2022,12 @@ private fun HelpScreen(onBack: () -> Unit) {
             }
         }
     }
+}
+
+private fun speedLabel(kb: Int): String = when {
+    kb <= 0 -> "Unlimited"
+    kb >= 1024 -> "${kb / 1024} MB/s"
+    else -> "$kb KB/s"
 }
 
 @Composable

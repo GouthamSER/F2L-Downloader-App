@@ -5,7 +5,10 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -129,6 +132,100 @@ fun YouTubePanel(
                     colors = ButtonDefaults.buttonColors(containerColor = accent)
                 ) { Text(if (audioTab) "Download audio" else "Download video") }
                 if (!canAdd) Text("Choose a download folder first", color = textSecondary, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+/** Playlist link: list the videos, tick the ones wanted, pick one quality for all, queue them (2 at a time). */
+@Composable
+fun PlaylistPanel(
+    url: String,
+    accent: Color,
+    textPrimary: Color,
+    textSecondary: Color,
+    surface: Color,
+    onAdd: (List<YtDlpEngine.PlaylistEntry>, YtDlpEngine.Option) -> Unit
+) {
+    val context = LocalContext.current
+    var info by remember(url) { mutableStateOf<YtDlpEngine.PlaylistInfo?>(null) }
+    var error by remember(url) { mutableStateOf<String?>(null) }
+    var loading by remember(url) { mutableStateOf(true) }
+    var attempt by remember(url) { mutableIntStateOf(0) }
+    val picked = remember(url) { mutableStateMapOf<String, Boolean>() }
+    var preset by remember(url) { mutableIntStateOf(1) }
+
+    val presets = remember {
+        fun v(h: Int) = YtDlpEngine.Option("Video ${h}p", false, "bv*[height<=$h]+ba/b[height<=$h]", null, null, 0L)
+        listOf(
+            v(1080), v(720), v(480), v(360),
+            YtDlpEngine.Option("MP3 320 kbps", true, null, "mp3", "320K", 0L),
+            YtDlpEngine.Option("MP3 192 kbps", true, null, "mp3", "192K", 0L),
+            YtDlpEngine.Option("M4A (no re-encode)", true, null, "m4a", null, 0L)
+        )
+    }
+
+    LaunchedEffect(url, attempt) {
+        loading = true; error = null
+        runCatching { YtDlpEngine.fetchPlaylist(context, url) }
+            .onSuccess { r -> info = r; picked.clear(); r.entries.forEach { picked[it.id] = true } }
+            .onFailure { error = it.message?.lineSequence()?.firstOrNull { l -> l.isNotBlank() } ?: "Could not read this playlist" }
+        loading = false
+    }
+
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(surface).padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text("YouTube playlist", color = accent, fontWeight = FontWeight.Bold)
+        when {
+            loading -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                CircularProgressIndicator(color = accent, modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
+                Text("Reading playlist…", color = textSecondary, style = MaterialTheme.typography.bodySmall)
+            }
+            error != null -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(error ?: "", color = Color(0xFFE0554F), style = MaterialTheme.typography.bodySmall, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                OutlinedButton(onClick = { attempt++ }) { Text("Retry") }
+            }
+            info != null -> {
+                val pl = info!!
+                val count = pl.entries.count { picked[it.id] == true }
+                Text(pl.title, color = textPrimary, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("$count / ${pl.entries.size} selected", color = textSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { pl.entries.forEach { picked[it.id] = true } }) { Text("All") }
+                    TextButton(onClick = { pl.entries.forEach { picked[it.id] = false } }) { Text("None") }
+                }
+                Column(Modifier.fillMaxWidth().heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
+                    pl.entries.forEach { e ->
+                        Row(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                                .clickable { picked[e.id] = !(picked[e.id] ?: false) },
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(
+                                checked = picked[e.id] == true,
+                                onCheckedChange = { picked[e.id] = it },
+                                colors = CheckboxDefaults.colors(checkedColor = accent)
+                            )
+                            Text(e.title, color = textPrimary, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                            if (e.durationSec > 0) Text(fmtDuration(e.durationSec), color = textSecondary, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+                Text("Quality for all", color = textSecondary, style = MaterialTheme.typography.labelMedium)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    presets.forEachIndexed { i, o ->
+                        FilterChip(selected = preset == i, onClick = { preset = i }, label = { Text(o.label) })
+                    }
+                }
+                Button(
+                    onClick = { onAdd(pl.entries.filter { picked[it.id] == true }, presets[preset]) },
+                    enabled = count > 0,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = accent)
+                ) { Text("Download $count item${if (count == 1) "" else "s"}") }
+                Text("Downloads run 2 at a time. The rest wait in the queue.", color = textSecondary, style = MaterialTheme.typography.labelSmall)
             }
         }
     }

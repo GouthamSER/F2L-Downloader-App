@@ -41,8 +41,21 @@ object YtDlpEngine {
         val audio: List<Option>
     )
 
+    data class PlaylistEntry(val id: String, val title: String, val durationSec: Long) {
+        val url: String get() = "https://www.youtube.com/watch?v=$id"
+    }
+    data class PlaylistInfo(val title: String, val entries: List<PlaylistEntry>)
+
     private val YT_REGEX = Regex("^https?://([a-z0-9-]+\\.)?(youtube\\.com|youtu\\.be|youtube-nocookie\\.com)/", RegexOption.IGNORE_CASE)
     fun isYoutube(url: String): Boolean = YT_REGEX.containsMatchIn(url.trim())
+
+    private val LIST_RE = Regex("[?&]list=")
+    private val V_RE = Regex("[?&]v=")
+    /** Link carries a playlist id (youtube.com/playlist?list=… or watch?v=…&list=…). */
+    fun isPlaylistUrl(url: String): Boolean = isYoutube(url) && LIST_RE.containsMatchIn(url)
+    /** Pure playlist page (no single video picked): treat as a playlist by default. */
+    fun isPurePlaylist(url: String): Boolean =
+        isPlaylistUrl(url) && !V_RE.containsMatchIn(url) && !url.contains("youtu.be/", ignoreCase = true)
 
     @Volatile private var ready = false
     private val initLock = Any()
@@ -102,6 +115,34 @@ object YtDlpEngine {
             JSONObject(out.substring(out.indexOf('{')))
         }
         parseInfo(json)
+    }
+
+    /** Fast listing of a playlist (titles only, no per-video format scan). Capped at 200 items. */
+    suspend fun fetchPlaylist(ctx: Context, url: String): PlaylistInfo = withContext(Dispatchers.IO) {
+        ensureInit(ctx)
+        maybeUpdate(ctx, force = false)
+        val json = withUpdateRetry(ctx) {
+            val req = YoutubeDLRequest(url.trim())
+            req.addOption("-J")
+            req.addOption("--flat-playlist")
+            req.addOption("--yes-playlist")
+            req.addOption("--playlist-end", "200")
+            req.addOption("--no-warnings")
+            val out = YoutubeDL.getInstance().execute(req, null, null).out
+            JSONObject(out.substring(out.indexOf('{')))
+        }
+        val arr = json.optJSONArray("entries")
+        val list = ArrayList<PlaylistEntry>()
+        if (arr != null) {
+            for (i in 0 until arr.length()) {
+                val e = arr.optJSONObject(i) ?: continue
+                val id = e.optString("id", "")
+                if (id.isBlank()) continue
+                list.add(PlaylistEntry(id, e.optString("title", "").ifBlank { "video $id" }, e.optDouble("duration", 0.0).toLong()))
+            }
+        }
+        if (list.isEmpty()) error("No videos found in this playlist (private or empty?)")
+        PlaylistInfo(json.optString("title", "Playlist").ifBlank { "Playlist" }, list)
     }
 
     private fun parseInfo(j: JSONObject): Info {
@@ -195,7 +236,8 @@ object YtDlpEngine {
             maybeUpdate(ctx, force = false)
             val streams = if (kind == "video" && (format ?: "").contains("+")) 2 else 1
             var best = 0.0
-            withUpdateRetry(ctx) { runYtDlp(id, url, dir, kind, format, audioExt, audioQuality, streams, total, { p -> if (p > best) best = p; best }, onProgress) }
+            val limitKb = ctx.getSharedPreferences("f2l_settings", Context.MODE_PRIVATE).getInt("speed_limit_kbps", 0)
+            withUpdateRetry(ctx) { runYtDlp(id, url, dir, kind, format, audioExt, audioQuality, streams, total, limitKb, { p -> if (p > best) best = p; best }, onProgress) }
         }
 
         val produced = findOutput(dir) ?: error("yt-dlp finished but no output file was created")
@@ -228,6 +270,7 @@ object YtDlpEngine {
         audioQuality: String?,
         streams: Int,
         total: Long,
+        limitKb: Int,
         monotonic: (Double) -> Double,
         onProgress: (DownloadEngine.Progress) -> Unit
     ) {
@@ -237,6 +280,7 @@ object YtDlpEngine {
         req.addOption("--no-mtime")
         req.addOption("--no-warnings")
         req.addOption("-N", "4")                       // parallel fragments
+        if (limitKb > 0) req.addOption("--limit-rate", "${limitKb}K")   // Settings speed cap
         req.addOption("-o", File(dir, "out.%(ext)s").absolutePath)
         if (kind == "audio") {
             req.addOption("-f", "bestaudio/best")

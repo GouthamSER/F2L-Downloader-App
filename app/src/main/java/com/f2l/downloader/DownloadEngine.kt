@@ -461,12 +461,31 @@ class DownloadEngine(private val context: Context) {
                                 var downloaded = existing
                                 var last = downloaded
                                 var lastT = System.nanoTime()
+                                // optional speed cap (Settings). Re-read every second so a change applies live.
+                                val limitPrefs = context.getSharedPreferences("f2l_settings", Context.MODE_PRIVATE)
+                                var limitBps = limitPrefs.getInt("speed_limit_kbps", 0) * 1024L
+                                var limitCheckT = System.nanoTime()
+                                var winStart = System.nanoTime()
+                                var winBytes = 0L
                                 while (true) {
                                     coroutineContext.ensureActive()
                                     val n = input.read(buffer)
                                     if (n < 0) break
                                     out.write(buffer, 0, n)
                                     downloaded += n
+                                    val tNow = System.nanoTime()
+                                    if (tNow - limitCheckT > 1_000_000_000L) {
+                                        val newLimit = limitPrefs.getInt("speed_limit_kbps", 0) * 1024L
+                                        if (newLimit != limitBps) { limitBps = newLimit; winStart = tNow; winBytes = 0L }
+                                        limitCheckT = tNow
+                                    }
+                                    if (limitBps > 0) {
+                                        winBytes += n
+                                        val elapsed = tNow - winStart
+                                        val needed = winBytes * 1_000_000_000L / limitBps
+                                        if (needed > elapsed) delay((needed - elapsed) / 1_000_000L)
+                                        if (elapsed > 3_000_000_000L) { winStart = System.nanoTime(); winBytes = 0L }
+                                    }
                                     val now = System.nanoTime()
                                     if (now - lastT > 500_000_000L) {
                                         val sec = (now - lastT) / 1e9

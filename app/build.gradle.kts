@@ -15,8 +15,8 @@ android {
 
         // yt-dlp bundles python + ffmpeg per CPU; keep phones only (x86 emulators dropped) to limit APK size
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
-        versionCode = 18
-        versionName = "3.8.0"
+        versionCode = 21
+        versionName = "3.9.0"
     }
 
     // Signed release builds (used by .github/workflows/release.yml). Keystore comes from env vars / GitHub Secrets.

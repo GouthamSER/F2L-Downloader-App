@@ -4,11 +4,15 @@
 
 An Android download manager built with Kotlin + Jetpack Compose. Multi-threaded direct-link downloads, a Liquid Glass UI, BitTorrent/magnet integration, and advanced network capabilities.
 
-Version **3.8.0**
+Version **3.9.0**
 
 ## Features
 
 **Downloads**
+- **Speed limit** (Settings): cap each download (256 KB/s – 10 MB/s). Applies live to direct links; YouTube applies it when the download starts.
+- **Search + sort** in the downloads list (newest, oldest, name, size).
+- **YouTube playlists**: paste a playlist link, tick videos, pick one quality; downloads run 2 at a time.
+- Sharing a YouTube link from the YouTube app opens the YouTube tab with the quality picker.
 - **YouTube tab** (v3.8): dedicated tab with paste button, quality picker and a "My YouTube" list. Also works from the Add screen.
 - YouTube (yt-dlp): paste a YouTube link, pick Video (144p–4K, as available) or Audio (MP3 128/192/320, M4A). yt-dlp self-updates. Resumable.
 - Multi-threaded segmented downloads (2–16 connections) for servers supporting HTTP Range requests, with automatic fallback to single-connection downloads.

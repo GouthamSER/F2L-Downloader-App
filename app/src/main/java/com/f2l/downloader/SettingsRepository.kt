@@ -25,6 +25,11 @@ class SettingsRepository(context: Context) {
         get() = prefs.getInt("default_connections", 8)
         set(v) = prefs.edit().putInt("default_connections", v).apply()
 
+    /** Download speed cap in KB/s per download. 0 = unlimited. */
+    var speedLimitKBps: Int
+        get() = prefs.getInt("speed_limit_kbps", 0)
+        set(v) = prefs.edit().putInt("speed_limit_kbps", v).apply()
+
     var defaultFolderUri: String?
         get() = prefs.getString("default_folder", null)
         set(v) = prefs.edit().putString("default_folder", v).apply()

@@ -177,6 +177,54 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private val ytWaiting = ArrayDeque<Long>()
+    private val maxYtParallel = 2
+
+    /** Playlist: add every picked video; only [maxYtParallel] run at once, the rest wait (QUEUED) and start as others finish. */
+    fun addYoutubePlaylist(entries: List<YtDlpEngine.PlaylistEntry>, folder: Uri, option: YtDlpEngine.Option) {
+        if (entries.isEmpty()) return
+        val tree = runCatching {
+            androidx.documentfile.provider.DocumentFile.fromTreeUri(getApplication(), folder)
+        }.getOrNull()
+        val ext = if (option.isAudio) (option.audioExt ?: "mp3") else "mp4"
+        val base = System.currentTimeMillis()
+        val used = HashSet<String>()
+        val created = entries.mapIndexed { i, e ->
+            val stem = YtDlpEngine.safeName(e.title) + if (option.isAudio) "" else " [${option.label}]"
+            var name = if (tree != null) getUniqueFileName(tree, "$stem.$ext", e.url + option.label) else "$stem.$ext"
+            if (!used.add(name.lowercase())) { name = "$stem (${i + 1}).$ext"; used.add(name.lowercase()) }
+            DownloadItem(
+                id = base + i,
+                url = e.url,
+                fileName = name,
+                folderUri = folder.toString(),
+                totalBytes = -1L,
+                connections = 1,
+                status = DownloadItem.Status.QUEUED,
+                ytKind = if (option.isAudio) "audio" else "video",
+                ytFormat = option.selector,
+                ytAudioExt = option.audioExt,
+                ytAudioQuality = option.audioQuality,
+                ytSize = 0L
+            )
+        }
+        setItems(created + _items.value)
+        ytWaiting.addAll(created.map { it.id })
+        pumpYtQueue()
+    }
+
+    /** Start waiting playlist items while fewer than [maxYtParallel] YouTube downloads are running. */
+    fun pumpYtQueue() {
+        var slots = maxYtParallel - _items.value.count { it.ytKind != null && it.status == DownloadItem.Status.DOWNLOADING }
+        while (slots > 0 && ytWaiting.isNotEmpty()) {
+            val id = ytWaiting.removeFirst()
+            val item = _items.value.find { it.id == id } ?: continue
+            if (item.status != DownloadItem.Status.QUEUED) continue
+            start(item)
+            slots--
+        }
+    }
+
     /** YouTube link: user picked a quality (video) or MP3/M4A (audio) in the YouTube panel. */
     fun addYoutube(url: String, folder: Uri, info: YtDlpEngine.Info, option: YtDlpEngine.Option, autoStart: Boolean = true) {
         val clean = url.trim()

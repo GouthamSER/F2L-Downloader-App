@@ -6,6 +6,9 @@
     <string name="nav_home">Home</string>
     <string name="nav_downloads">Downloads</string>
     <string name="nav_youtube">YouTube</string>
+    <string name="row_speed_limit">Speed limit</string>
+    <string name="yt_single_only">Single video only</string>
+    <string name="yt_whole_playlist">This link is in a playlist — download the whole playlist</string>
     <string name="yt_tab_download">Download</string>
     <string name="yt_tab_mine">My YouTube</string>
     <string name="yt_title">YouTube Downloader</string>
@@ -45,15 +48,12 @@
     <string name="label_save_to">Save to</string>
     <string name="action_choose_folder">Choose folder</string>
     <string name="folder_selected">Folder selected</string>
-    <string name="label_connections">Connections</string>
-    <string name="connections_hint">Downloads now use one connection per file (resumable, no part files). Server limits parallel streams.</string>
     <string name="label_start_immediately">Start download immediately</string>
     <string name="action_start_download">Start download</string>
     <string name="action_add_to_queue">Add to queue</string>
 
     <string name="settings_title">Settings</string>
     <string name="section_download_settings">Download settings</string>
-    <string name="row_parallel_connections">Parallel connections</string>
     <string name="row_download_folder">Download folder</string>
     <string name="row_wifi_only">Wi-Fi only</string>
     <string name="row_wifi_only_desc">Download only on Wi-Fi</string>
